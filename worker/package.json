@@ -1,0 +1,40 @@
+{
+  "name": "license-guard-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Workers 授权中心：按软件设置到期时间，到期即失效",
+  "type": "module",
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_TOKEN": {
+        "description": "管理后台登录口令。自定义一个 20 位以上的随机字符串即可。"
+      },
+      "LICENSE_KEY_ED25519": {
+        "description": "Ed25519 签名私钥。先在本地执行 `npm run keys` 生成，复制输出中 `LICENSE_KEY_ED25519=` 后面的值。升级已有部署时必须与原来一致，否则已发出的授权会全部失效。"
+      },
+      "LICENSE_KEY_ES256": {
+        "description": "ECDSA P-256 签名私钥（C# / .NET 客户端用）。同样来自 `npm run keys` 的输出。"
+      },
+      "DB": {
+        "description": "存放授权码、到期时间与设备记录的 D1 数据库。一键部署时会自动创建。"
+      },
+      "KV": {
+        "description": "登录限流用的 KV 命名空间。一键部署时会自动创建。"
+      }
+    }
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "db:local": "wrangler d1 execute DB --local --file=./schema.sql --yes",
+    "db:remote": "wrangler d1 execute DB --remote --file=./schema.sql --yes",
+    "keys": "node scripts/gen-keys.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.0.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.148.0"
+  }
+}

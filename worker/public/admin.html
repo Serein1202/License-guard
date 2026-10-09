@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex,nofollow" />
+<title>License Guard · 授权管理</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e3e6ea;
+    --border-strong: #cfd5dd;
+    --text: #1c2024;
+    --text-dim: #6b7480;
+    --brand: #2563eb;
+    --brand-soft: #eff4ff;
+    --ok: #15803d;
+    --ok-soft: #ecfdf3;
+    --warn: #b45309;
+    --warn-soft: #fffaeb;
+    --danger: #b42318;
+    --danger-soft: #fef3f2;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--brand); }
+
+  /* ---------- 登录 ---------- */
+  #login {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg);
+  }
+  #login .card {
+    width: 380px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 28px; box-shadow: 0 12px 32px rgba(16,24,40,.08);
+  }
+  #login h1 { margin: 0 0 4px; font-size: 19px; }
+  #login p { margin: 0 0 20px; color: var(--text-dim); font-size: 13px; }
+
+  /* ---------- 布局 ---------- */
+  header.top {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 0 22px; height: 56px;
+    display: flex; align-items: center; gap: 14px;
+    position: sticky; top: 0; z-index: 20;
+  }
+  header.top .logo { font-weight: 650; letter-spacing: -.2px; }
+  header.top .spacer { flex: 1; }
+  header.top .who { color: var(--text-dim); font-size: 12px; }
+  main { padding: 22px; max-width: 1340px; margin: 0 auto; }
+
+  /* ---------- 卡片 / 表格 ---------- */
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); margin-bottom: 18px; overflow: hidden;
+  }
+  .card > h2 {
+    margin: 0; padding: 14px 18px; font-size: 14px; font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .card > h2 .spacer { flex: 1; }
+  .card .body { padding: 16px 18px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .stat .k { color: var(--text-dim); font-size: 12px; }
+  .stat .v { font-size: 24px; font-weight: 650; margin-top: 4px; letter-spacing: -.5px; }
+  .stat .v.warn { color: var(--warn); }
+  .stat .v.danger { color: var(--danger); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { color: var(--text-dim); font-weight: 550; font-size: 12px; background: #fafbfc; white-space: nowrap; }
+  tbody tr:hover { background: #fafbfc; }
+  td.key { font-family: var(--mono); font-size: 12.5px; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .empty { padding: 34px; text-align: center; color: var(--text-dim); }
+
+  /* ---------- 控件 ---------- */
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--border); background: #fbfcfd; }
+  input, select, textarea {
+    font: inherit; color: var(--text); background: #fff;
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    padding: 7px 10px; outline: none; min-width: 0;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+  input[type="datetime-local"] { min-width: 210px; }
+  label.field { display: block; margin-bottom: 12px; }
+  label.field > span { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 5px; }
+  label.field > input, label.field > select, label.field > textarea { width: 100%; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .hint { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+  button {
+    font: inherit; cursor: pointer; border-radius: 8px;
+    border: 1px solid var(--border-strong); background: #fff; color: var(--text);
+    padding: 7px 13px; transition: .12s;
+  }
+  button:hover { background: #f3f5f7; }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button.primary:hover { filter: brightness(1.07); }
+  button.danger { color: var(--danger); border-color: #f3c0bb; background: #fff; }
+  button.danger:hover { background: var(--danger-soft); }
+  button.ghost { border-color: transparent; background: transparent; color: var(--brand); padding: 4px 6px; }
+  button.ghost:hover { background: var(--brand-soft); }
+  button.tiny { padding: 4px 9px; font-size: 12px; border-radius: 6px; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    border: none; background: transparent; border-radius: 0; padding: 9px 14px;
+    color: var(--text-dim); border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tabs button.on { color: var(--brand); border-bottom-color: var(--brand); font-weight: 550; }
+  .tabs button:hover { background: transparent; color: var(--text); }
+  .tabs button.on:hover { color: var(--brand); }
+
+  /* ---------- 徽标 ---------- */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 550; white-space: nowrap; }
+  .b-ok { background: var(--ok-soft); color: var(--ok); }
+  .b-warn { background: var(--warn-soft); color: var(--warn); }
+  .b-danger { background: var(--danger-soft); color: var(--danger); }
+  .b-off { background: #f1f3f5; color: var(--text-dim); }
+  .b-info { background: var(--brand-soft); color: var(--brand); }
+
+  /* ---------- 模态 ---------- */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(16,24,40,.42); z-index: 50;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal {
+    background: var(--panel); border-radius: 14px; width: 560px; max-width: 100%;
+    max-height: 90vh; overflow: auto; box-shadow: 0 20px 48px rgba(16,24,40,.22);
+  }
+  .modal h3 { margin: 0; padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 15px; }
+  .modal .body { padding: 18px 20px; }
+  .modal .foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; background: #fbfcfd; }
+
+  /* ---------- 提示 ---------- */
+  #toast { position: fixed; right: 20px; bottom: 20px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    background: #1c2024; color: #fff; padding: 10px 15px; border-radius: 9px;
+    font-size: 13px; box-shadow: 0 8px 24px rgba(16,24,40,.24); max-width: 380px;
+    animation: pop .18s ease-out;
+  }
+  .toast.err { background: var(--danger); }
+  .toast.ok { background: var(--ok); }
+  @keyframes pop { from { transform: translateY(6px); opacity: 0 } }
+
+  code.inline { font-family: var(--mono); background: #f1f3f5; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+  .keybox { font-family: var(--mono); font-size: 14px; background: var(--brand-soft); border: 1px dashed #b9cdfb; color: #1e40af; padding: 12px; border-radius: 8px; word-break: break-all; line-height: 1.9; }
+  .muted { color: var(--text-dim); }
+  .nowrap { white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<!-- ================= 登录 ================= -->
+<div id="login">
+  <div class="card">
+    <h1>License Guard</h1>
+    <p>输入管理口令以继续</p>
+    <label class="field">
+      <span>管理口令（ADMIN_TOKEN）</span>
+      <input id="loginToken" type="password" placeholder="部署时 wrangler secret put ADMIN_TOKEN 的值" autocomplete="current-password" />
+    </label>
+    <button class="primary" style="width:100%" id="loginBtn">登录</button>
+    <div class="hint" style="margin-top:12px">口令只保存在本机浏览器，服务端仅保存其哈希比对结果。</div>
+  </div>
+</div>
+
+<!-- ================= 主界面 ================= -->
+<div id="app" style="display:none">
+  <header class="top">
+    <div class="logo">License Guard</div>
+    <span class="badge b-info" id="envBadge">--</span>
+    <div class="spacer"></div>
+    <span class="who" id="srvTime"></span>
+    <button class="tiny" id="refreshBtn">刷新</button>
+    <button class="tiny" id="logoutBtn">退出</button>
+  </header>
+
+  <main>
+    <div class="stats" id="stats"></div>
+
+    <div class="tabs">
+      <button data-tab="lic" class="on">授权码</button>
+      <button data-tab="prod">软件 / 产品</button>
+      <button data-tab="audit">审计日志</button>
+    </div>
+
+    <!-- ---------- 授权码 ---------- -->
+    <section id="tab-lic">
+      <div class="card">
+        <div class="toolbar">
+          <select id="fProduct"><option value="">全部软件</option></select>
+          <select id="fStatus">
+            <option value="">全部状态</option>
+            <option value="active">正常</option>
+            <option value="suspended">暂停</option>
+            <option value="revoked">吊销</option>
+          </select>
+          <input id="fQuery" placeholder="搜索授权码 / 客户 / 备注" style="width:240px" />
+          <button id="searchBtn">查询</button>
+          <div class="spacer" style="flex:1"></div>
+          <button class="primary" id="newLicBtn">+ 生成授权码</button>
+        </div>
+        <div id="licTableWrap"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 产品 ---------- -->
+    <section id="tab-prod" style="display:none">
+      <div class="card">
+        <h2>软件列表 <span class="spacer"></span><button class="primary tiny" id="newProdBtn">+ 新增软件</button></h2>
+        <div id="prodTableWrap"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 审计 ---------- -->
+    <section id="tab-audit" style="display:none">
+      <div class="card">
+        <h2>审计日志 <span class="spacer"></span><button class="tiny" id="auditRefresh">刷新</button></h2>
+        <div id="auditTableWrap"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast"></div>
+<div id="modals"></div>
+
+<script>
+/* ================================================================
+   License Guard 管理后台（零依赖，纯前端）
+   ================================================================ */
+(function () {
+  "use strict";
+
+  var API = "/admin/api";
+  var TIMER = null;
+  var CUR_LICENSE = null;
+  var CACHE = { products: [], licenses: [], stats: null };
+
+  /* ---------------------------- 基础 ---------------------------- */
+
+  function $(s, r) { return (r || document).querySelector(s); }
+  function $$(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
+  function el(tag, attrs, html) {
+    var n = document.createElement(tag);
+    if (attrs) for (var k in attrs) n.setAttribute(k, attrs[k]);
+    if (html !== undefined) n.innerHTML = html;
+    return n;
+  }
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function toast(msg, kind) {
+    var t = el("div", { class: "toast" + (kind ? " " + kind : "") }, esc(msg));
+    $("#toast").appendChild(t);
+    setTimeout(function () { t.remove(); }, kind === "err" ? 5200 : 3000);
+  }
+  function token() { return localStorage.getItem("lg_admin_token") || ""; }
+
+  function api(path, method, body) {
+    var opt = { method: method || "GET", headers: {} };
+    if (token()) opt.headers["Authorization"] = "Bearer " + token();
+    if (body !== undefined) {
+      opt.headers["Content-Type"] = "application/json";
+      opt.body = JSON.stringify(body);
+    }
+    return fetch(API + path, opt).then(function (r) {
+      return r.json().catch(function () { return { ok: false, code: "PARSE", message: "响应解析失败" }; })
+        .then(function (j) {
+          if (!j.ok) {
+            var e = new Error(j.message || "请求失败");
+            e.code = j.code;
+            throw e;
+          }
+          return j.data;
+        });
+    });
+  }
+
+  /* ---------------------------- 时间 ---------------------------- */
+
+  function fmtLocal(ts) {
+    if (!ts) return "永久";
+    var d = new Date(ts * 1000);
+    var p = function (n) { return String(n).padStart(2, "0"); };
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+           p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function toInputValue(ts) {
+    if (!ts) return "";
+    var d = new Date(ts * 1000);
+    var p = function (n) { return String(n).padStart(2, "0"); };
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" +
+           p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function fromInputValue(v) {
+    if (!v) return null;
+    var t = new Date(v).getTime();
+    return isNaN(t) ? null : Math.floor(t / 1000);
+  }
+  function daysLeft(ts) {
+    if (!ts) return null;
+    return Math.ceil((ts * 1000 - Date.now()) / 86400000);
+  }
+  function expiryCell(row, product) {
+    var aexp = row.expires_at !== null ? row.expires_at : (product ? product.default_expires_at : null);
+    if (!aexp) return '<span class="badge b-info">永久</span>';
+    var grace = row.grace_days !== null ? row.grace_days : (product ? product.default_grace_days : 0);
+    var d = daysLeft(aexp);
+    var cls = d < 0 ? "b-danger" : d <= 7 ? "b-warn" : "b-ok";
+    var label = d < 0 ? ("已过期 " + Math.abs(d) + " 天") : (d + " 天后");
+    return '<div class="nowrap">' + esc(fmtLocal(aexp)) + '</div>' +
+           '<span class="badge ' + cls + '">' + esc(label) + '</span>' +
+           (grace > 0 ? ' <span class="muted" style="font-size:11.5px">宽限' + grace + '天</span>' : '');
+  }
+  function statusBadge(s) {
+    if (s === "active") return '<span class="badge b-ok">正常</span>';
+    if (s === "suspended") return '<span class="badge b-warn">暂停</span>';
+    if (s === "revoked") return '<span class="badge b-danger">吊销</span>';
+    return '<span class="badge b-off">' + esc(s) + "</span>";
+  }
+  function productOf(id) {
+    for (var i = 0; i < CACHE.products.length; i++) if (CACHE.products[i].id === id) return CACHE.products[i];
+    return null;
+  }
+
+  /* ---------------------------- 登录 ---------------------------- */
+
+  $("#loginBtn").onclick = function () {
+    var t = $("#loginToken").value.trim();
+    if (!t) return toast("请输入口令", "err");
+    fetch(API + "/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: t })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) return toast(j.message || "登录失败", "err");
+        localStorage.setItem("lg_admin_token", t);
+        boot();
+      })
+      .catch(function (e) { toast("网络错误: " + e.message, "err"); });
+  };
+  $("#loginToken").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") $("#loginBtn").click();
+  });
+  $("#logoutBtn").onclick = function () {
+    localStorage.removeItem("lg_admin_token");
+    location.reload();
+  };
+  $("#refreshBtn").onclick = function () { refreshAll(); };
+  $("#auditRefresh").onclick = function () { loadAudit(); };
+
+  /* ---------------------------- Tab ---------------------------- */
+
+  $$(".tabs button").forEach(function (b) {
+    b.onclick = function () {
+      $$(".tabs button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+      ["lic", "prod", "audit"].forEach(function (t) {
+        $("#tab-" + t).style.display = t === b.dataset.tab ? "" : "none";
+      });
+      if (b.dataset.tab === "audit") loadAudit();
+    };
+  });
+
+  /* ---------------------------- 概览 ---------------------------- */
+
+  function loadStats() {
+    return api("/stats").then(function (s) {
+      CACHE.stats = s;
+      var L = s.licenses || {};
+      var cards = [
+        { k: "授权码总数", v: L.total || 0 },
+        { k: "生效中", v: L.active || 0 },
+        { k: "已过期", v: L.expired || 0, cls: "warn" },
+        { k: "7 天内到期", v: L.expiring_7d || 0, cls: "warn" },
+        { k: "已吊销", v: L.revoked || 0, cls: "danger" },
+        { k: "激活设备数", v: s.activations || 0 },
+        { k: "软件数量", v: s.products || 0 }
+      ];
+      $("#stats").innerHTML = cards.map(function (c) {
+        return '<div class="stat"><div class="k">' + esc(c.k) + '</div>' +
+               '<div class="v ' + (c.cls || "") + '">' + esc(c.v) + "</div></div>";
+      }).join("");
+    });
+  }
+
+  /* ---------------------------- 产品 ---------------------------- */
+
+  function loadProducts() {
+    return api("/products").then(function (list) {
+      CACHE.products = list;
+      var sel = $("#fProduct");
+      var keep = sel.value;
+      sel.innerHTML = '<option value="">全部软件</option>' + list.map(function (p) {
+        return '<option value="' + esc(p.id) + '">' + esc(p.name) + " (" + esc(p.app_id) + ")</option>";
+      }).join("");
+      sel.value = keep;
+
+      $("#prodTableWrap").innerHTML = list.length
+        ? '<table><thead><tr>' +
+            "<th>名称</th><th>app_id</th><th>签名算法</th><th>默认到期</th><th>宽限</th>" +
+            "<th>设备数</th><th>离线容忍</th><th>到期行为</th><th style=\"width:1%\"></th>" +
+          "</tr></thead><tbody>" +
+          list.map(function (p) {
+            return "<tr>" +
+              "<td><strong>" + esc(p.name) + "</strong></td>" +
+              '<td class="key">' + esc(p.app_id) + "</td>" +
+              '<td><span class="badge b-off">' + esc(p.sign_alg) + "</span></td>" +
+              "<td>" + (p.default_expires_at ? esc(fmtLocal(p.default_expires_at)) : '<span class="badge b-info">永久</span>') + "</td>" +
+              '<td class="num">' + esc(p.default_grace_days) + " 天</td>" +
+              '<td class="num">' + esc(p.max_devices) + "</td>" +
+              '<td class="num">' + esc(p.offline_grace_days) + " 天</td>" +
+              "<td>" + (p.fail_mode === "hard"
+                ? '<span class="badge b-danger">直接闪退</span>'
+                : '<span class="badge b-warn">提示后退出</span>') + "</td>" +
+              '<td class="nowrap">' +
+                '<button class="tiny" data-edit-prod="' + esc(p.id) + '">编辑</button> ' +
+                '<button class="tiny danger" data-del-prod="' + esc(p.id) + '">删除</button>' +
+              "</td></tr>";
+          }).join("") + "</tbody></table>"
+        : '<div class="empty">还没有软件。点击右上角「新增软件」创建第一个。</div>';
+    });
+  }
+
+  function productForm(p) {
+    var isEdit = !!p;
+    p = p || { app_id: "", name: "", sign_alg: "ed25519", default_expires_at: null, default_grace_days: 0, max_devices: 1, offline_grace_days: 7, fail_mode: "hard", exit_code: 0, token_ttl_sec: 86400, heartbeat_sec: 21600, features: [] };
+
+    var html =
+      '<div class="row2">' +
+        '<label class="field"><span>软件名称</span><input id="pName" value="' + esc(p.name) + '" placeholder="我的工具箱" /></label>' +
+        '<label class="field"><span>app_id（客户端硬编码，创建后可改但需同步客户端）</span>' +
+          '<input id="pAppId" value="' + esc(p.app_id) + '" ' + (isEdit ? "disabled" : "") + ' placeholder="mytool" /></label>' +
+      "</div>" +
+      '<div class="row2">' +
+        '<label class="field"><span>签名算法</span><select id="pAlg">' +
+          '<option value="ed25519"' + (p.sign_alg === "ed25519" ? " selected" : "") + ">Ed25519（推荐，Python/Node）</option>" +
+          '<option value="es256"' + (p.sign_alg === "es256" ? " selected" : "") + ">ECDSA P-256（C#/.NET）</option>" +
+        "</select></label>" +
+        '<label class="field"><span>默认到期时间（留空 = 永久）</span>' +
+          '<input type="datetime-local" id="pExp" value="' + esc(toInputValue(p.default_expires_at)) + '" /></label>' +
+      "</div>" +
+      '<div class="row2">' +
+        '<label class="field"><span>到期后宽限天数</span><input type="number" id="pGrace" min="0" value="' + esc(p.default_grace_days) + '" /></label>' +
+        '<label class="field"><span>允许同时激活的设备数</span><input type="number" id="pDev" min="1" value="' + esc(p.max_devices) + '" /></label>' +
+      "</div>" +
+      '<div class="row2">' +
+        '<label class="field"><span>断网容忍天数（超过必须联网否则失效）</span><input type="number" id="pOff" min="0" value="' + esc(p.offline_grace_days) + '" /></label>' +
+        '<label class="field"><span>到期时的行为</span><select id="pFail">' +
+          '<option value="hard"' + (p.fail_mode === "hard" ? " selected" : "") + ">直接闪退（进程立即退出）</option>" +
+          '<option value="message"' + (p.fail_mode === "message" ? " selected" : "") + ">弹提示后退出</option>" +
+        "</select></label>" +
+      "</div>" +
+      '<div class="row2">' +
+        '<label class="field"><span>令牌有效期（秒，越小撤销越快生效）</span><input type="number" id="pTtl" value="' + esc(p.token_ttl_sec) + '" /></label>' +
+        '<label class="field"><span>心跳间隔（秒）</span><input type="number" id="pHb" value="' + esc(p.heartbeat_sec) + '" /></label>' +
+      "</div>" +
+      '<label class="field"><span>功能开关（逗号分隔，可空）</span><input id="pFeat" value="' + esc((p.features || []).join(",")) + '" placeholder="pro,export" /></label>' +
+      '<div class="hint">签名算法一旦选定，客户端必须用对应公钥验签。Ed25519 更推荐；只有 .NET 客户端才需要 ES256。</div>';
+
+    openModal(isEdit ? "编辑软件" : "新增软件", html, function () {
+      var payload = {
+        name: $("#pName").value.trim() || $("#pAppId").value.trim(),
+        sign_alg: $("#pAlg").value,
+        default_expires_at: fromInputValue($("#pExp").value),
+        default_grace_days: Number($("#pGrace").value || 0),
+        max_devices: Number($("#pDev").value || 1),
+        offline_grace_days: Number($("#pOff").value || 0),
+        fail_mode: $("#pFail").value,
+        token_ttl_sec: Number($("#pTtl").value || 86400),
+        heartbeat_sec: Number($("#pHb").value || 21600),
+        features: $("#pFeat").value.split(",").map(function (s) { return s.trim(); }).filter(Boolean)
+      };
+      if (!isEdit) payload.app_id = $("#pAppId").value.trim();
+      if (!isEdit && !payload.app_id) return toast("请填写 app_id", "err");
+
+      var req = isEdit ? api("/products/" + p.id, "PATCH", payload) : api("/products", "POST", payload);
+      req.then(function () {
+        toast(isEdit ? "已保存" : "软件已创建", "ok");
+        closeModal();
+        refreshAll();
+      }).catch(function (e) { toast(e.message, "err"); });
+    });
+  }
+
+  /* ---------------------------- 授权码 ---------------------------- */
+
+  function loadLicenses() {
+    var qs = [];
+    if ($("#fProduct").value) qs.push("product_id=" + encodeURIComponent($("#fProduct").value));
+    if ($("#fStatus").value) qs.push("status=" + encodeURIComponent($("#fStatus").value));
+    if ($("#fQuery").value.trim()) qs.push("q=" + encodeURIComponent($("#fQuery").value.trim()));
+    qs.push("limit=200");
+
+    return api("/licenses?" + qs.join("&")).then(function (res) {
+      CACHE.licenses = res.items;
+      if (res.server_time) {
+        $("#srvTime").textContent = "服务端 " + new Date(res.server_time * 1000).toLocaleString();
+      }
+      if (!res.items.length) {
+        $("#licTableWrap").innerHTML = '<div class="empty">没有符合条件的授权码</div>';
+        return;
+      }
+      $("#licTableWrap").innerHTML =
+        '<table><thead><tr>' +
+          "<th>授权码</th><th>软件</th><th>客户 / 备注</th><th>到期</th><th>设备</th><th>状态</th><th style=\"width:1%\">操作</th>" +
+        "</tr></thead><tbody>" +
+        res.items.map(function (l) {
+          var prod = productOf(l.product_id);
+          return '<tr data-id="' + esc(l.id) + '">' +
+            '<td class="key">' + esc(l.key_display) + "</td>" +
+            "<td>" + esc(prod ? prod.name : l.product_id) + "</td>" +
+            "<td>" + esc(l.customer || "-") + (l.note ? '<div class="muted" style="font-size:12px">' + esc(l.note) + "</div>" : "") + "</td>" +
+            "<td>" + expiryCell(l, prod) + "</td>" +
+            '<td class="num">' + esc(l.activation_count || 0) + " / " + esc((l.max_devices !== null && l.max_devices !== undefined) ? l.max_devices : (prod ? prod.max_devices : 1)) + "</td>" +
+            "<td>" + statusBadge(l.status) + "</td>" +
+            '<td class="nowrap">' +
+              '<button class="tiny" data-edit="' + esc(l.id) + '">改到期</button> ' +
+              '<button class="tiny" data-devices="' + esc(l.id) + '">设备</button> ' +
+              '<button class="tiny" data-toggle="' + esc(l.id) + '">' + (l.status === "active" ? "停用" : "启用") + "</button> " +
+              '<button class="tiny danger" data-del="' + esc(l.id) + '">删除</button>' +
+            "</td></tr>";
+        }).join("") + "</tbody></table>";
+      return res;
+    });
+  }
+
+  /* --- 生成授权码 --- */
+  $("#newLicBtn").onclick = function () {
+    if (!CACHE.products.length) return toast("请先创建一个软件", "err");
+    var preset = $("#fProduct").value || CACHE.products[0].id;
+    var html =
+      '<label class="field"><span>所属软件</span><select id="lProd">' +
+        CACHE.products.map(function (p) {
+          return '<option value="' + esc(p.id) + '"' + (p.id === preset ? " selected" : "") + ">" + esc(p.name) + " (" + esc(p.app_id) + ")</option>";
+        }).join("") +
+      "</select></label>" +
+      '<div class="row2">' +
+        '<label class="field"><span>到期时间</span><input type="datetime-local" id="lExp" /></label>' +
+        '<label class="field"><span>或：从今天起 N 天后到期</span><input type="number" id="lDays" min="0" placeholder="例如 365" /></label>' +
+      "</div>" +
+      '<div class="hint" style="margin-top:-6px;margin-bottom:12px">两个都留空 = 永久授权，沿用软件默认设置。</div>' +
+      '<div class="row2">' +
+        '<label class="field"><span>宽限天数（留空继承软件设置）</span><input type="number" id="lGrace" min="0" /></label>' +
+        '<label class="field"><span>设备数（留空继承软件设置）</span><input type="number" id="lDev" min="1" /></label>' +
+      "</div>" +
+      '<div class="row2">' +
+        '<label class="field"><span>客户名称</span><input id="lCust" placeholder="张三 / XX公司" /></label>' +
+        '<label class="field"><span>生成数量</span><input type="number" id="lCount" value="1" min="1" max="200" /></label>' +
+      "</div>" +
+      '<label class="field"><span>备注</span><input id="lNote" placeholder="订单号、联系方式等" /></label>';
+
+    openModal("生成授权码", html, function () {
+      var expTs = fromInputValue($("#lExp").value);
+      var days = $("#lDays").value;
+      var payload = {
+        product_id: $("#lProd").value,
+        count: Number($("#lCount").value || 1),
+        customer: $("#lCust").value.trim() || null,
+        note: $("#lNote").value.trim() || null
+      };
+      if ($("#lGrace").value !== "") payload.grace_days = Number($("#lGrace").value);
+      if ($("#lDev").value !== "") payload.max_devices = Number($("#lDev").value);
+      if (expTs) payload.expires_at = expTs;
+      else if (days !== "") payload.expires_in_days = Number(days);
+
+      api("/licenses", "POST", payload).then(function (res) {
+        closeModal();
+        refreshAll();
+        var keys = res.created.map(function (c) { return c.key; }).join("\n");
+        var detail =
+          '<p class="muted" style="margin-top:0">已生成 ' + res.created.length + " 个授权码，到期时间：" +
+            esc(res.created[0].expires_at ? fmtLocal(res.created[0].expires_at) : "永久") + "</p>" +
+          '<div class="keybox">' + res.created.map(function (c) { return esc(c.key); }).join("<br/>") + "</div>" +
+          '<label class="field" style="margin-top:14px"><span>批量复制</span><textarea rows="5" readonly>' + esc(keys) + "</textarea></label>";
+        openModal("生成成功", detail, null, "关闭");
+      }).catch(function (e) { toast(e.message, "err"); });
+    });
+  };
+
+  /* --- 修改到期时间 --- */
+  function editLicense(id) {
+    api("/licenses/" + id).then(function (l) {
+      var prod = l.product || productOf(l.product_id);
+      var html =
+        '<p class="muted" style="margin-top:0"><code class="inline">' + esc(l.key_display) + "</code> · " + esc(prod ? prod.name : "") + "</p>" +
+        '<label class="field"><span>到期时间（清空 = 永久）</span>' +
+          '<input type="datetime-local" id="eExp" value="' + esc(toInputValue(l.expires_at)) + '" /></label>' +
+        '<div class="row2">' +
+          '<label class="field"><span>预设：从今天起</span><select id="ePreset">' +
+            '<option value="">不改</option>' +
+            '<option value="7">7 天后</option><option value="30">30 天后</option>' +
+            '<option value="90">90 天后</option><option value="365">1 年后</option>' +
+            '<option value="0">永久</option>' +
+          "</select></label>" +
+          '<label class="field"><span>宽限天数（空 = 继承）</span><input type="number" id="eGrace" min="0" value="' + esc(l.grace_days === null ? "" : l.grace_days) + '" /></label>' +
+        "</div>" +
+        '<div class="row2">' +
+          '<label class="field"><span>设备数上限（空 = 继承）</span><input type="number" id="eDev" min="1" value="' + esc(l.max_devices === null ? "" : l.max_devices) + '" /></label>' +
+          '<label class="field"><span>状态</span><select id="eStatus">' +
+            '<option value="active"' + (l.status === "active" ? " selected" : "") + ">正常</option>" +
+            '<option value="suspended"' + (l.status === "suspended" ? " selected" : "") + ">暂停</option>" +
+            '<option value="revoked"' + (l.status === "revoked" ? " selected" : "") + ">吊销（永久失效）</option>" +
+          "</select></label>" +
+        "</div>" +
+        '<div class="row2">' +
+          '<label class="field"><span>客户</span><input id="eCust" value="' + esc(l.customer || "") + '" /></label>' +
+          '<label class="field"><span>备注</span><input id="eNote" value="' + esc(l.note || "") + '" /></label>' +
+        "</div>";
+
+      openModal("设置到期时间", html, function () {
+        var preset = $("#ePreset").value;
+        var payload = {
+          grace_days: $("#eGrace").value === "" ? null : Number($("#eGrace").value),
+          max_devices: $("#eDev").value === "" ? null : Number($("#eDev").value),
+          status: $("#eStatus").value,
+          customer: $("#eCust").value.trim() || null,
+          note: $("#eNote").value.trim() || null
+        };
+        if (preset !== "") {
+          if (preset === "0") payload.expires_at = null;
+          else payload.expires_in_days = Number(preset);
+        } else {
+          payload.expires_at = fromInputValue($("#eExp").value);
+        }
+        api("/licenses/" + id, "PATCH", payload).then(function () {
+          toast("已更新", "ok");
+          closeModal();
+          refreshAll();
+        }).catch(function (e) { toast(e.message, "err"); });
+      });
+    }).catch(function (e) { toast(e.message, "err"); });
+  }
+
+  /* --- 设备管理 --- */
+  function showDevices(id) {
+    api("/licenses/" + id + "/activations").then(function (acts) {
+      var html = acts.length
+        ? '<table><thead><tr><th>机器码</th><th>设备名</th><th>平台</th><th>最后在线</th><th></th></tr></thead><tbody>' +
+          acts.map(function (a) {
+            return "<tr>" +
+              '<td class="key" title="' + esc(a.machine_id) + '">' + esc(String(a.machine_id).slice(0, 16)) + "…</td>" +
+              "<td>" + esc(a.machine_name || "-") + "</td>" +
+              "<td>" + esc(a.platform || "-") + "</td>" +
+              '<td class="nowrap">' + esc(fmtLocal(a.last_seen_at)) + "</td>" +
+              '<td><button class="tiny danger" data-unbind="' + esc(a.id) + '">解绑</button></td></tr>';
+          }).join("") + "</tbody></table>"
+        : '<div class="empty">该授权码还没有激活任何设备</div>';
+      html += '<div style="margin-top:14px"><button class="danger" id="resetAll">清空全部设备（释放设备位）</button></div>';
+
+      openModal("已激活设备", html, null, "关闭");
+      CUR_LICENSE = id;
+      var rb = document.getElementById("resetAll");
+      if (rb) rb.onclick = function () {
+        api("/licenses/" + id + "/reset", "POST", {}).then(function (r) {
+          toast("已清空 " + r.cleared + " 台设备", "ok");
+          closeModal();
+          loadLicenses();
+        }).catch(function (e) { toast(e.message, "err"); });
+      };
+    }).catch(function (e) { toast(e.message, "err"); });
+  }
+
+  /* ---------------------------- 审计 ---------------------------- */
+
+  function loadAudit() {
+    return api("/audit?limit=200").then(function (rows) {
+      $("#auditTableWrap").innerHTML = rows.length
+        ? '<table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>详情</th><th>IP</th></tr></thead><tbody>' +
+          rows.map(function (r) {
+            return "<tr>" +
+              '<td class="nowrap">' + esc(fmtLocal(r.ts)) + "</td>" +
+              "<td>" + esc(r.actor || "-") + "</td>" +
+              '<td><code class="inline">' + esc(r.action) + "</code></td>" +
+              '<td class="key">' + esc(r.target || "-") + "</td>" +
+              '<td class="muted" style="max-width:340px;overflow:hidden;text-overflow:ellipsis">' + esc(r.detail || "-") + "</td>" +
+              "<td>" + esc(r.ip || "-") + "</td></tr>";
+          }).join("") + "</tbody></table>"
+        : '<div class="empty">暂无日志</div>';
+    });
+  }
+
+  /* ---------------------------- 模态 ---------------------------- */
+
+  function openModal(title, html, onOk, okText) {
+    var wrap = $("#modals");
+    wrap.innerHTML = "";
+    var ov = el("div", { class: "overlay" });
+    var m = el("div", { class: "modal" });
+    m.appendChild(el("h3", null, esc(title)));
+    var b = el("div", { class: "body" });
+    b.innerHTML = html;
+    m.appendChild(b);
+
+    if (onOk) {
+      var foot = el("div", { class: "foot" });
+      var cancel = el("button", null, "取消");
+      cancel.onclick = closeModal;
+      var okb = el("button", { class: "primary" }, esc(okText || "确定"));
+      okb.onclick = function () { onOk(); };
+      foot.appendChild(cancel);
+      foot.appendChild(okb);
+      m.appendChild(foot);
+    } else {
+      var foot2 = el("div", { class: "foot" });
+      var close = el("button", { class: "primary" }, esc(okText || "关闭"));
+      close.onclick = closeModal;
+      foot2.appendChild(close);
+      m.appendChild(foot2);
+    }
+
+    ov.appendChild(m);
+    ov.addEventListener("click", function (e) { if (e.target === ov) closeModal(); });
+    wrap.appendChild(ov);
+  }
+  function closeModal() { $("#modals").innerHTML = ""; }
+  window.closeModal = closeModal;
+
+  /* ---------------------------- 事件委托 ---------------------------- */
+
+  document.addEventListener("click", function (e) {
+    var t = e.target.closest ? e.target.closest("button") : null;
+    if (!t) return;
+    var d = t.dataset;
+
+    if (d.edit) return editLicense(d.edit);
+    if (d.devices) return showDevices(d.devices);
+
+    if (d.unbind) {
+      api("/activations/" + d.unbind, "DELETE").then(function () {
+        toast("已解绑", "ok");
+        if (CUR_LICENSE) showDevices(CUR_LICENSE);
+        loadLicenses();
+      }).catch(function (e2) { toast(e2.message, "err"); });
+      return;
+    }
+
+    if (d.toggle) {
+      var row = CACHE.licenses.filter(function (x) { return x.id === d.toggle; })[0];
+      if (!row) return;
+      var next = row.status === "active" ? "suspended" : "active";
+      api("/licenses/" + d.toggle, "PATCH", { status: next }).then(function () {
+        toast(next === "active" ? "已启用" : "已停用", "ok");
+        refreshAll();
+      }).catch(function (e2) { toast(e2.message, "err"); });
+      return;
+    }
+
+    if (d.del) {
+      if (!confirm("删除后无法恢复，且使用该授权码的客户端会立即失效。确定删除？")) return;
+      api("/licenses/" + d.del, "DELETE").then(function () {
+        toast("已删除", "ok");
+        refreshAll();
+      }).catch(function (e2) { toast(e2.message, "err"); });
+      return;
+    }
+
+    if (d.editProd) {
+      var p = productOf(d.editProd);
+      return productForm(p);
+    }
+
+    if (d.delProd) {
+      if (!confirm("删除软件会同时删除其下所有授权码，确定？")) return;
+      api("/products/" + d.delProd, "DELETE").then(function () {
+        toast("已删除", "ok");
+        refreshAll();
+      }).catch(function (e2) { toast(e2.message, "err"); });
+      return;
+    }
+  });
+
+  $("#newProdBtn").onclick = function () { productForm(null); };
+  $("#searchBtn").onclick = function () { loadLicenses(); };
+  $("#fProduct").onchange = function () { loadLicenses(); };
+  $("#fStatus").onchange = function () { loadLicenses(); };
+  $("#fQuery").addEventListener("keydown", function (e) { if (e.key === "Enter") loadLicenses(); });
+
+  /* ---------------------------- 启动 ---------------------------- */
+
+  function refreshAll() {
+    return Promise.all([loadStats(), loadProducts()]).then(function () { return loadLicenses(); });
+  }
+
+  function boot() {
+    api("/me").then(function (m) {
+      $("#login").style.display = "none";
+      $("#app").style.display = "";
+      $("#envBadge").textContent = m.env;
+      refreshAll().catch(function (e) { toast(e.message, "err"); });
+      if (TIMER) clearInterval(TIMER);
+      TIMER = setInterval(function () {
+        if (document.visibilityState === "visible") loadStats();
+      }, 60000);
+    }).catch(function () {
+      localStorage.removeItem("lg_admin_token");
+      $("#login").style.display = "flex";
+      $("#app").style.display = "none";
+    });
+  }
+
+  if (token()) boot();
+})();
+</script>
+</body>
+</html>

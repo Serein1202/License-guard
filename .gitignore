@@ -1,0 +1,43 @@
+# ============================================================
+#  千万不要提交到 Git 的内容
+# ============================================================
+
+# 签名私钥 —— 泄露 = 任何人都能伪造授权
+worker/keys.json
+keys.json
+*.pem
+
+# 本地开发密钥
+.dev.vars
+.dev.vars.*
+worker/.dev.vars
+worker/.dev.vars.*
+
+# 但部署模板要提交（Cloudflare 一键部署靠它生成密钥输入框）
+!.dev.vars.example
+!worker/.dev.vars.example
+
+# Cloudflare 本地状态
+.wrangler/
+worker/.wrangler/
+
+# 依赖
+node_modules/
+
+# 构建产物
+bin/
+obj/
+dist/
+build/
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 客户端本地状态（万一在项目目录里跑过）
+state.dat
+license.key

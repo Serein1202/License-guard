@@ -1,0 +1,66 @@
+name = "license-guard"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ============================================================
+# D1 / KV 绑定
+#
+# 这里刻意只声明绑定名，不写 database_id / id。
+#
+# 依据 Cloudflare 官方的「资源自动创建」(Automatic resource provisioning，
+# wrangler >= 4.45，本项目的 wrangler 已满足)：
+#   · 部署时资源不存在 → 自动在你的账号里创建并绑定
+#   · 资源已存在       → 直接复用，不会重复创建
+#   · 从 GitHub / 面板部署时，生成的资源 ID 只留在 Cloudflare 控制台，
+#     不会回写进本文件
+#
+# 这样做的好处：
+#   1. 仓库里不含任何账号专属 ID，别人 fork 后无需改配置即可部署
+#   2. 你的真实资源 ID 不会因为仓库公开而暴露
+#
+# D1 显式写了 database_name，是为了让 wrangler 按名字匹配到已有数据库，
+# 避免重复建库（官方建议：绑定一定要带资源名，不要只写 binding）。
+#
+# 如需关闭自动创建，用：npx wrangler deploy --no-x-provision
+# ============================================================
+
+[[d1_databases]]
+binding = "DB"
+database_name = "license-guard"
+
+[[kv_namespaces]]
+binding = "KV"
+
+[vars]
+ENVIRONMENT = "production"
+# 允许跨域调用管理接口的前端地址；管理页面同源部署时留空即可
+ADMIN_CORS_ORIGIN = ""
+
+# ============================================================
+# 必须配置的 Secrets（不要写进本文件！）
+# 在 Cloudflare Dashboard → Settings → Variables and Secrets 添加，
+# 或本地执行：npx wrangler secret put <名称>
+#
+#   ADMIN_TOKEN          管理后台登录口令
+#   LICENSE_KEY_ED25519  Ed25519 私钥 (pkcs8 DER, base64url)
+#   LICENSE_KEY_ES256    ECDSA P-256 私钥 (pkcs8 DER, base64url)
+#
+# 生成密钥：npm run keys   （生成 worker/keys.json）
+# 一键部署时，这些项会依据 .dev.vars.example 自动生成表单
+# ============================================================
+
+# 允许在 Worker 中直接 import 文本文件
+#   · .html  —— 管理后台单页
+#   · .sql   —— 表结构，用于首次请求时自动建表（见 src/schema.ts）
+[[rules]]
+type = "Text"
+globs = ["**/*.html", "**/*.sql"]
+fallthrough = true
+
+# 每天 UTC 03:15 清理过期激活记录
+[triggers]
+crons = ["15 3 * * *"]
+
+[observability]
+enabled = true
