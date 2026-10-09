@@ -20,18 +20,16 @@
 
 ## 一键部署（推荐）
 
-这个按钮就是给**第一次部署的人**准备的。点下去之后 Cloudflare 会：
-
-1. 把本仓库**克隆一份到你的 GitHub 账号**（你可以继续改，也能同步上游更新）
+1. 把本仓库**克隆一份到自己的 GitHub 账号**
 2. **自动创建 D1 数据库和 KV 命名空间**，并绑定到 Worker
-3. 自动配好 Workers Builds —— 以后你 `git push` 就自动重新部署
-4. 弹出表单，让你填 3 个密钥
+3. 自动配好 Workers Builds —— 以后 `git push` 就自动重新部署
+4. 弹出表单，填 3 个密钥
 
-> ℹ️ **仓库里不含任何 D1 / KV 的 ID**，所以你 fork 之后**不用改任何配置**。配置里只声明了绑定名，Cloudflare 会在部署时按需自动创建资源并绑定。
+> ℹ️ **仓库里不含任何 D1 / KV 的 ID**，所以 fork 之后**不用改任何配置**。配置里只声明了绑定名，Cloudflare 会在部署时按需自动创建资源并绑定。
 
 ### 唯一需要你在本机做的一步：生成签名密钥
 
-这一步无法省略 —— 你的客户端程序需要内嵌**公钥**来离线验签，而**私钥**要交给 Worker 签发令牌。密钥必须由你自己生成。
+这一步无法省略 —— 客户端程序需要内嵌**公钥**来离线验签，而**私钥**要交给 Worker 签发令牌。密钥必须由你自己生成。
 
 ```bash
 git clone https://github.com/Serein1202/license-guard.git
@@ -155,7 +153,7 @@ guard.StartWatchdog();
                   │     ▼        │                           │
                   │   D1 数据库 ── 授权码 / 到期时间 / 设备    │
                   │     ▲                                    │
-   你（管理员）──► │  Worker  /admin  ── 网页后台              │
+   管理员──► │  Worker  /admin  ── 网页后台              │
                   └──────────────────────────────────────────┘
                                     │
                               签名令牌（离线可验）
@@ -215,30 +213,6 @@ npx wrangler secret put LICENSE_KEY_ED25519
 npx wrangler secret put LICENSE_KEY_ES256
 npx wrangler deploy
 ```
-
-> ⚠️ 命令行部署时，wrangler 会把自动创建的资源 ID **回写进 `worker/wrangler.toml`**。
-> 不想让 ID 进仓库的话，提交前删掉那几行（或别 `git add` 这个文件）。
-> **从 GitHub / 面板部署没有这个问题** —— ID 只留在 Cloudflare 控制台，不会回写仓库。
-
-详细步骤（含每一步的预期输出与排错）见 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
-
-### 同步上游更新（Fork 用户）
-
-```bash
-git remote add upstream https://github.com/Serein1202/license-guard.git
-git fetch upstream
-git merge upstream/main     # 注意别把自己的 wrangler.toml ID 覆盖掉
-```
-
-### 给别人的项目加部署按钮
-
-在你自己仓库的 README 里放这段（子目录版）：
-
-```markdown
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/<你的用户名>/license-guard/tree/main/worker)
-```
-
----
 
 ## 目录结构
 
@@ -368,21 +342,6 @@ eyJ2IjoxLCJzdWIiOiJsaWNfYTFiMmMzIiwibWlkIjoiMjY4YThiMTRlYTZm...
 
 开发中实测抓到两个真实 bug 并修复：纯 Python Ed25519 未拒绝小阶点、激活设备数计数多加 1。细节见 [docs/SECURITY.md](docs/SECURITY.md)。
 
----
-
-## 开源方案调研
-
-市面上确实有现成的开源授权系统。**如果你需要完整的订阅计费、客户门户、多租户 SaaS，用现成的更划算；如果你只需要「按软件设到期时间 + 到期闪退」这一件事，本项目的代码量只有它们的几十分之一，改起来完全可控。**
-
-| 项目 | 技术栈 | 协议 | 适合场景 |
-|---|---|---|---|
-| [**Keygen**](https://github.com/keygen-sh/keygen-api) | Rails / PostgreSQL | Fair Core License（非自由） | 最成熟，有云托管版，SDK 最全 |
-| [**Keygate**](https://github.com/tabloy/keygate) | Go + PostgreSQL | AGPL-3.0 | 一体化：授权 + Stripe 支付 + 客户门户 |
-| [**Cedar-V License-Manager**](https://github.com/cedar-v/License-Manager) | Go + Vue3 | GPL-3.0 | 中文项目，RSA-PSS + AES-GCM，支持离线授权包、内网部署 |
-| [**LicenseEye**](https://github.com/PythonSmall-Q/LicenseEye) | Cloudflare Workers + D1 + React | 开源 | 架构与本项目最接近，功能更重 |
-| **本项目** | Cloudflare Workers + D1 | MIT | 极简、免费、单文件后台、代码全可读可改 |
-
----
 
 ## 文档
 
