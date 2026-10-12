@@ -15,6 +15,7 @@ import { DAY, evaluate, policyOf } from "../evaluate";
 import { issueLicenseToken, issueTimeToken } from "../sign";
 import {
   clientMeta,
+  deny,
   fail,
   hashKey,
   json,
@@ -139,7 +140,8 @@ export async function handleActivate(req: Request, env: Env, url: URL): Promise<
   const verdict = await evaluate(env, { product, license, machineId, requireActivation: false });
   if (!verdict.allowed) {
     await audit(env, { actor: "app", action: "activate.deny", target: license.id, detail: verdict.code, ip: meta.ip });
-    return fail(verdict.code, verdict.message, 403);
+    // 拒绝时也下发策略快照：客户端据此执行「到期时的行为」/ 退出码等后端设置
+    return deny(verdict.code, verdict.message, 403, verdict.policy);
   }
 
   await upsertActivation(env, {
@@ -194,7 +196,8 @@ export async function handleVerify(req: Request, env: Env, url: URL): Promise<Re
   const verdict = await evaluate(env, { product, license, machineId, requireActivation: true });
   if (!verdict.allowed) {
     await audit(env, { actor: "app", action: "verify.deny", target: license.id, detail: verdict.code, ip: meta.ip });
-    return fail(verdict.code, verdict.message, 403);
+    // 同上：让客户端在「被拒」这条路径上也能跟随后端设置
+    return deny(verdict.code, verdict.message, 403, verdict.policy);
   }
 
   await upsertActivation(env, {

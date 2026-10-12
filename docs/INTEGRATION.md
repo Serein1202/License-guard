@@ -338,7 +338,37 @@ guard.authorize()
 guard.start_watchdog()     # 到期那一刻，即使程序正在跑也会退出
 ```
 
-`watchdog_interval_sec` 决定「到期后最多多久才退出」。默认 120 秒，对多数场景够用。想让到期立刻生效就设 15，代价是请求次数变多。
+`watchdog_interval_sec` 决定「到期后最多多久才退出」。传 `0` 表示**跟随后端下发的 `heartbeat_sec`**（推荐：后端是唯一权威）。想让到期立刻生效就在后台把「心跳间隔」调小。
+
+### 让客户端完全跟随后端策略
+
+策略（`fail_mode` / `exit_code` / `offline_grace_days` / `heartbeat_sec` / `token_ttl_sec` / `max_devices`）由服务端随响应下发，客户端只负责执行。为保证「被拒绝」这条路径也能跟随后端：
+
+- `/v1/activate`、`/v1/verify` 被判定为不允许时，会返回 `{ok:false, code, message, policy}`
+  （带策略快照），客户端据此决定闪退还是弹提示、用哪个退出码
+- 若后端是旧版本（拒绝响应不带 `policy`），Python SDK 会自动补一次 `GET /v1/meta` 拉取策略；
+  再失败才退回本地默认值
+
+因此客户端不需要（也不应该）在自己的代码里写死这些策略。
+本地 `GuardConfig` 里的 `fail_mode` / `exit_code` 只是「后端够不着时」的兜底默认。
+
+### 让后台的「吊销 / 改期」立刻生效
+
+客户端本地会缓存服务端签发的令牌。默认情况下 `online_check_interval_sec = 0`：**每次校验都必须联网**，只有真连不上服务器时才退回离线容忍放行。因此在后台把授权改成过期 / 吊销 / 暂停，客户端下一次校验（启动时，或运行期看门狗周期）就会被拦下。
+
+如果想减少请求量，把它调大（例如 3600），则在该时长内复用缓存、不再联网 —— 代价是后台改动要等到下次联网才生效：
+
+```python
+cfg = GuardConfig(
+    ...,
+    online_check_interval_sec = 0,     # 0 = 每次都联网（推荐）；>0 = 该时长内复用缓存
+)
+```
+
+另外，服务端明确判失效（`LICENSE_EXPIRED` / `LICENSE_REVOKED` / `LICENSE_SUSPENDED` / `KEY_NOT_FOUND` / `APP_DISABLED` / `APP_UNKNOWN`）时，客户端会**同时清掉本地缓存令牌**，否则用户只要断网就能凭旧令牌的离线容忍期把程序继续跑起来。限流（`RATE_LIMITED`）这类临时性拒绝不算失效：只要离线容忍仍有效就照常放行，避免一次限流把正常用户挡在门外。
+
+> 真正的「不可绕过」取决于 `offline_grace_days`：它决定客户端在断网状态下最长能跑多久。
+> 想做到断网也立刻失效，把它设为 `0`（此时客户端必须始终能连上 Worker）。
 
 ### 内网 / 完全断网环境
 

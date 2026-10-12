@@ -169,6 +169,29 @@ export function fail(code: string, message: string, status = 400, extra: Record<
   });
 }
 
+/**
+ * 拒绝响应（校验/激活被判定为不允许时用）。
+ * 与 fail 的区别：会把策略快照一并下发，客户端才能严格跟随
+ * 「到期时的行为」「退出码」等后端设置，而不是用本地默认值。
+ */
+export function deny(
+  code: string,
+  message: string,
+  status = 403,
+  policy?: unknown,
+): Response {
+  const body: Record<string, unknown> = { ok: false, code, message };
+  if (policy && typeof policy === "object") body.policy = policy;
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...CORS_HEADERS,
+    },
+  });
+}
+
 export function noContent(): Response {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }

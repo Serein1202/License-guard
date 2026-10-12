@@ -27,6 +27,9 @@ License Guard · Python 客户端 SDK
 * 到期时间由服务端签发进令牌，客户端只做验签，**改不了**。
 * 系统时间被调回过去会被检测到（tamper），不会因此延长有效期。
 * 断网超过 offline_grace_days 天后必须联网，否则同样失效。
+* 默认（online_check_interval_sec = 0）**每次校验都联网**，
+  后台吊销 / 改期 / 设过期可立即生效；只有真的连不上服务器时，
+  才退回离线容忍放行。把该值调大可在该时长内复用缓存、减少请求量。
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -59,7 +63,7 @@ __all__ = [
     "ecdsa_p256_verify",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -282,6 +286,11 @@ class GuardConfig:
     fail_mode: str = "hard"
     """hard = 直接闪退；message = 打印提示后退出"""
 
+    allow_dialog: bool = True
+    """允许 SDK 自己弹系统对话框吗（仅 fail_mode="message" 且未设 on_denied 时才有意义）。
+    调用方若要求「任何情况下都不得出现授权相关提示」，传 False，
+    此时 message 模式会退化成静默退出（日志也不打），一切提示由调用方自己决定。"""
+
     exit_code: int = 0
     strict_clock: bool = True
     """检测到系统时间被回拨时，是否直接判失效"""
@@ -291,7 +300,19 @@ class GuardConfig:
     retry_times: int = 2
     heartbeat_sec: int = 21600
     watchdog_interval_sec: int = 120
-    """看门狗检查间隔；到期后最多这么久就会闪退"""
+    """看门狗检查间隔；到期后最多这么久就会闪退。
+    传 0 = 不指定，跟随后端下发的 heartbeat_sec（服务端心跳间隔）"""
+
+    online_check_interval_sec: int = 0
+    """缓存令牌允许「免联网直接放行」的最长时长（秒）。
+    0 = 每次校验都必须联网（连不上时再按离线容忍兜底），
+        后台吊销 / 改期 / 设过期能立即生效（推荐）；
+    >0 = 该时长内复用缓存不再联网，仅超时后重新联网，可减少请求量。"""
+
+    heartbeat_cap_sec: int = 0
+    """看门狗复查间隔的上限（秒）。
+    0 = 不设上限，完全跟随后端下发的 heartbeat_sec（推荐：后端是唯一权威）；
+    >0 = 取 min(后端心跳, 本值)，用于本地强制更频繁地复查。"""
 
     storage_dir: Optional[str] = None
     on_denied: Optional[Callable[[str, str], None]] = None
@@ -471,6 +492,25 @@ class _Token:
 #  6. 主体
 # ══════════════════════════════════════════════════════════════════
 
+# 服务端明确拒绝时，认为授权已「终态失效」的错误码：
+# 命中这些码必须立刻作废本地缓存，否则用户只要断网，
+# 就能凭旧令牌的离线容忍期继续把程序跑起来。
+_TERMINAL_DENY_CODES = {
+    "LICENSE_EXPIRED",      # 已到期
+    "LICENSE_REVOKED",      # 被吊销
+    "LICENSE_SUSPENDED",    # 被暂停
+    "KEY_NOT_FOUND",        # 授权码不存在
+    "APP_DISABLED",         # 应用被停用
+    "APP_UNKNOWN",          # 应用不存在
+}
+
+# 服务端的「临时性」拒绝：不代表授权失效，不应把正常用户挡在门外。
+# 只要离线容忍期还没过，就按离线放行处理（否则一次限流就会导致程序打不开）。
+_SOFT_DENY_CODES = {
+    "RATE_LIMITED",         # 请求过于频繁
+    "NOT_CONFIGURED",       # 服务端配置暂时缺失
+}
+
 class LicenseGuard:
     def __init__(self, config: GuardConfig):
         self.cfg = config
@@ -543,6 +583,28 @@ class LicenseGuard:
             return 0
         return last + int(self._state.get("offline_grace_days") or 0) * 86400
 
+    def _can_skip_online(self, now: int, payload: Dict[str, Any]) -> bool:
+        """缓存令牌能否直接放行（完全不联网）。
+
+        必须同时满足三个条件：
+          1. 令牌自身未过期（exp）
+          2. 离线容忍期未耗尽（last_online + offline_grace_days）
+          3. 距上次成功联网未超过 online_check_interval_sec
+
+        第 3 条是关键：online_check_interval_sec 配成 0 时本方法恒为 False，
+        即每次校验都会联网，后台的吊销 / 改期 / 设过期能立即生效；
+        真的连不上时才走下面的离线容忍兜底（allow_offline）。
+        """
+        if now > int(payload.get("exp") or 0):
+            return False
+        if now > self._offline_until():
+            return False
+        interval = int(self.cfg.online_check_interval_sec or 0)
+        if interval <= 0:
+            return False
+        last_online = int(self._state.get("last_online") or 0)
+        return bool(last_online) and (now - last_online) < interval
+
     # ------------------------------------------------------ 核心校验
     def verify(self, allow_offline: bool = True) -> LicenseInfo:
         """
@@ -587,8 +649,8 @@ class LicenseGuard:
                 if hexp and now > int(hexp):
                     self._raise("LICENSE_EXPIRED", self._expired_msg(payload))
 
-                # 令牌未过期 且 离线容忍未耗尽 → 直接放行，不联网
-                if now <= int(payload.get("exp") or 0) and now <= self._offline_until():
+                # 令牌未过期 且 离线容忍未耗尽 且 未到复查间隔 → 直接放行，不联网
+                if self._can_skip_online(now, payload):
                     self._state["last_wall"] = now
                     self.store.save(self._state)
                     self._info = self._info_from_payload(payload, offline=True)
@@ -618,7 +680,25 @@ class LicenseGuard:
                 raise LicenseError("NETWORK", "无法连接授权服务器，且本地没有可用的离线授权")
 
             if not resp.get("ok"):
-                code = str(resp.get("code") or "DENIED")
+                code = str(resp.get("code") or "DENIED").upper()
+                # 后端是唯一权威：拒绝时也要按它下发的「到期时的行为」/ 退出码执行。
+                # 新版本 Worker 会在拒绝响应里直接带 policy；老版本没带，
+                # 就主动去 /v1/meta 拉一次，避免退化成本地默认值。
+                self._adopt_policy(resp.get("policy") or self._fetch_remote_policy())
+                # 服务端明确判失效 → 顺手清掉本地缓存令牌，
+                # 否则断网后还能靠旧令牌的离线容忍期蒙混过关
+                if code in _TERMINAL_DENY_CODES:
+                    self.store.clear()
+                    self._state = {}
+                    self._raise(code, str(resp.get("message") or "授权被拒绝"))
+                # 限流等临时性拒绝：授权本身没问题，别让用户打不开程序，
+                # 只要离线容忍期还有效就按离线放行
+                if code in _SOFT_DENY_CODES and payload is not None and allow_offline:
+                    offline_until = self._offline_until()
+                    if offline_until and now <= offline_until:
+                        self._log("服务端临时拒绝(%s)，按离线容忍放行" % code)
+                        self._info = self._info_from_payload(payload, offline=True)
+                        return self._info
                 self._raise(code, str(resp.get("message") or "授权被拒绝"))
 
             data = resp["data"]
@@ -649,15 +729,54 @@ class LicenseGuard:
             }
             self.store.save(self._state)
 
-            # 服务端下发的策略可以覆盖本地默认值
-            if policy.get("fail_mode") in ("hard", "message"):
-                self.cfg.fail_mode = policy["fail_mode"]
-            if isinstance(policy.get("exit_code"), int):
-                self.cfg.exit_code = policy["exit_code"]
+            # 服务端下发的策略覆盖本地默认值（后端是唯一权威）
+            self._adopt_policy(policy)
 
             self._info = self._info_from_payload(payload, offline=False, data=data)
             self._log("校验通过:", self._info.status, "到期:", self._info.expires_at)
             return self._info
+
+    # -------------------------------------------------------- 策略同步
+    def _adopt_policy(self, policy: Any) -> None:
+        """把服务端下发的策略套到本地配置上。
+
+        设计原则：**后端是唯一权威**。客户端不自己揣测「到期时该闪退还是弹提示」，
+        而是完全照后端下发的 fail_mode / exit_code 执行；
+        本地配置里的值只作为「后端够不着时」的兜底默认。
+
+        刻意不在这里落 offline_grace_days：离线容忍只在成功联网后才有意义，
+        由 verify() 的成功分支写进状态文件。
+        """
+        if not isinstance(policy, dict):
+            return
+        fm = policy.get("fail_mode")
+        if fm in ("hard", "message"):
+            self.cfg.fail_mode = fm
+        ec = policy.get("exit_code")
+        if isinstance(ec, int) and ec >= 0:
+            self.cfg.exit_code = ec
+        self._log("已采纳后端策略: fail_mode=%s exit_code=%s" % (self.cfg.fail_mode, self.cfg.exit_code))
+
+    def _fetch_remote_policy(self, timeout: int = 6) -> Optional[Dict[str, Any]]:
+        """GET /v1/meta 拉取后端策略快照（该接口不需要授权码）。
+
+        用于「被拒绝」这条路径：老版本 Worker 的拒绝响应不带 policy，
+        这里补一次请求，保证退出行为仍然由后端说了算。
+        任何失败都返回 None，绝不阻断主流程。
+        """
+        url = f"{self.server_url}/v1/meta?app_id={urllib.parse.quote(str(self.app_id))}"
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"license-guard-py/{__version__}"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            policy = data.get("policy") if isinstance(data, dict) else None
+            self._log("已从 /v1/meta 拉取后端策略:", policy)
+            return policy if isinstance(policy, dict) else None
+        except Exception as e:
+            self._log("拉取后端策略失败（继续用本地默认值）:", e)
+            return None
 
     # ------------------------------------------------------- 辅助
     @staticmethod
@@ -689,7 +808,8 @@ class LicenseGuard:
         if self.cfg.on_denied:
             self.cfg.on_denied(code, message)
             raise LicenseError(code, message)
-        _terminate(self.cfg.fail_mode, self.cfg.exit_code, message, code)
+        _terminate(self.cfg.fail_mode, self.cfg.exit_code, message, code,
+                   self.cfg.allow_dialog)
 
     # ----------------------------------------------------- 公开 API
     def authorize(self) -> LicenseInfo:
@@ -699,7 +819,8 @@ class LicenseGuard:
         except LicenseError as e:
             if self.cfg.on_denied:
                 raise
-            _terminate(self.cfg.fail_mode, self.cfg.exit_code, e.message, e.code)
+            _terminate(self.cfg.fail_mode, self.cfg.exit_code, e.message, e.code,
+                       self.cfg.allow_dialog)
             raise  # 理论上到不了
 
     def start_watchdog(self) -> None:
@@ -712,12 +833,14 @@ class LicenseGuard:
         self._stop.clear()
 
         def loop() -> None:
-            interval = max(15, int(self.cfg.watchdog_interval_sec))
+            # 首个间隔：本地未指定（<=0）时跟随后端下发的心跳间隔
+            first = int(self.cfg.watchdog_interval_sec or 0) or \
+                int(self._state.get("heartbeat_sec") or 0) or self.cfg.heartbeat_sec
+            interval = max(15, first)
             while not self._stop.wait(interval):
                 try:
                     info = self.verify()
-                    hb = int(self._state.get("heartbeat_sec") or self.cfg.heartbeat_sec)
-                    interval = max(15, min(hb, 900))
+                    interval = self._watchdog_interval()
                     self._log("看门狗: OK", info.days_left())
                 except LicenseError as e:
                     self._log("看门狗: 失败", e.code)
@@ -728,10 +851,22 @@ class LicenseGuard:
                             pass
                         self._stop.wait(600)
                         continue
-                    _terminate(self.cfg.fail_mode, self.cfg.exit_code, e.message, e.code)
+                    _terminate(self.cfg.fail_mode, self.cfg.exit_code, e.message, e.code,
+                               self.cfg.allow_dialog)
 
         self._watchdog = threading.Thread(target=loop, name="license-guard-watchdog", daemon=True)
         self._watchdog.start()
+
+    def _watchdog_interval(self, hb: Optional[int] = None) -> int:
+        """看门狗下一次复查要等多久（秒）。
+
+        取后端下发的心跳间隔；heartbeat_cap_sec > 0 时在本地再夹一个上限
+        （0 = 不封顶，完全由后端说了算）。下限 15 秒防止把服务端打爆。
+        """
+        if hb is None:
+            hb = int(self._state.get("heartbeat_sec") or self.cfg.heartbeat_sec)
+        cap = int(self.cfg.heartbeat_cap_sec or 0)
+        return max(15, hb if cap <= 0 else min(hb, cap))
 
     def stop_watchdog(self) -> None:
         self._stop.set()
@@ -790,11 +925,15 @@ def _app_version() -> str:
 #  7. 终止策略 —— 「到期直接闪退」
 # ══════════════════════════════════════════════════════════════════
 
-def _terminate(mode: str, code: int, message: str, err_code: str) -> None:
+def _terminate(mode: str, code: int, message: str, err_code: str,
+               allow_dialog: bool = True) -> None:
     """
     hard    : 不走 Python 清理流程，直接终止进程 —— 表现就是「闪退」。
     message : 输出一行提示后退出。
     两者都保证：代码执行不到后面的业务逻辑。
+
+    allow_dialog=False 时，连 message 模式也不打印、不弹框，完全静默退出
+    （用于「不能让用户看出程序带授权」的场景）。
     """
     try:
         sys.stdout.flush()
@@ -802,7 +941,7 @@ def _terminate(mode: str, code: int, message: str, err_code: str) -> None:
     except Exception:
         pass
 
-    if mode == "message":
+    if mode == "message" and allow_dialog:
         banner = "!" * 58
         try:
             sys.stderr.write(
@@ -813,9 +952,8 @@ def _terminate(mode: str, code: int, message: str, err_code: str) -> None:
         except Exception:
             pass
         _try_dialog(message)
-        os._exit(code)
 
-    # hard：不打印堆栈、不触发 atexit，直接走
+    # hard，或 allow_dialog=False 的 message：不打印堆栈、不触发 atexit，直接走
     os._exit(code)
 
 
