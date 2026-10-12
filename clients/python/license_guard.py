@@ -286,11 +286,6 @@ class GuardConfig:
     fail_mode: str = "hard"
     """hard = 直接闪退；message = 打印提示后退出"""
 
-    allow_dialog: bool = True
-    """允许 SDK 自己弹系统对话框吗（仅 fail_mode="message" 且未设 on_denied 时才有意义）。
-    调用方若要求「任何情况下都不得出现授权相关提示」，传 False，
-    此时 message 模式会退化成静默退出（日志也不打），一切提示由调用方自己决定。"""
-
     exit_code: int = 0
     strict_clock: bool = True
     """检测到系统时间被回拨时，是否直接判失效"""
@@ -317,6 +312,11 @@ class GuardConfig:
     storage_dir: Optional[str] = None
     on_denied: Optional[Callable[[str, str], None]] = None
     """自定义拒绝回调 (code, message) -> None；设了它就不会自动退出"""
+
+    allow_dialog: bool = True
+    """允许 SDK 自己弹系统对话框吗（仅 fail_mode="message" 且未设 on_denied 时才有意义）。
+    调用方若要求「任何情况下都不得出现授权相关提示」，传 False，
+    此时 message 模式会退化成静默退出（连 stderr 也不写），一切提示由调用方自己决定。"""
 
     debug: bool = False
 
@@ -932,8 +932,8 @@ def _terminate(mode: str, code: int, message: str, err_code: str,
     message : 输出一行提示后退出。
     两者都保证：代码执行不到后面的业务逻辑。
 
-    allow_dialog=False 时，连 message 模式也不打印、不弹框，完全静默退出
-    （用于「不能让用户看出程序带授权」的场景）。
+    allow_dialog=False：连 message 模式的 stderr 提示与系统对话框都跳过，
+    直接静默退出。供「不得暴露授权存在」的宿主程序使用。
     """
     try:
         sys.stdout.flush()
@@ -952,8 +952,9 @@ def _terminate(mode: str, code: int, message: str, err_code: str,
         except Exception:
             pass
         _try_dialog(message)
+        os._exit(code)
 
-    # hard，或 allow_dialog=False 的 message：不打印堆栈、不触发 atexit，直接走
+    # hard（或调用方禁止任何提示）：不打印堆栈、不触发 atexit，直接走
     os._exit(code)
 
 
