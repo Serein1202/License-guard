@@ -130,6 +130,83 @@ guard.StartWatchdog();
 
 ---
 
+## AI Skill：一句话接入（可选）
+
+如果你用 **WorkBuddy** 或任何支持 **Agent Skills** 的 AI 编程工具，上一步可以整个交给 AI —— 你只需要说一句：
+
+> **给这个项目加上授权验证**
+
+仓库里的 [`skill/`](skill/) 就是干这个的。它会自动走完：读部署配置 → 自检服务端 → 探测项目语言 → 装 SDK → 生成配置常量 → **在真正的业务入口注入守卫** → 引导你签发授权码 → 跑一遍验证。
+
+### 安装
+
+把 `skill/` 整个目录拷进你的 skills 目录（WorkBuddy 默认在 `~/.workbuddy/skills/`）：
+
+```bash
+# Windows（PowerShell / CMD）
+xcopy skill "%USERPROFILE%\.workbuddy\skills\license-guard" /E /I
+
+# macOS / Linux
+cp -r skill ~/.workbuddy/skills/license-guard
+```
+
+### ⚠️ 首次使用前，必须先填部署配置
+
+Skill 靠部署配置找到「你的」授权服务器。仓库里 `skill/config.json` 是**占位模板**，有两种填法：
+
+**推荐 · 新建 `config.local.json`**（已加入 `.gitignore`，从机制上杜绝误提交）
+
+在 `skill/` 目录下新建 `config.local.json`，填你自己那套。两个脚本会**优先读它**：
+
+```jsonc
+{
+  "server_url": "https://license-guard.<你的子域>.workers.dev",
+  "admin_url":  "https://license-guard.<你的子域>.workers.dev/admin",
+  "public_keys": {
+    "ed25519": { "raw_b64url": "<npm run keys 输出的 Ed25519 公钥>" },
+    "es256":   { "spki_b64":  "<npm run keys 输出的 ES256 公钥>" }
+  }
+}
+```
+
+> 只写你要覆盖的字段即可，其余会沿用 `config.json` 里的默认值。
+
+**备选 · 直接改 `skill/config.json`** —— 更省事，但填好后记得**别提交这个文件**。
+
+| 字段 | 填什么 |
+|---|---|
+| `server_url` | 你的 Worker 地址 |
+| `admin_url` | 同上，末尾加 `/admin` |
+| `public_keys` | `npm run keys` 输出的两个公钥：`ed25519` 给 Python/Node，`es256` 给 C# |
+
+> 这几项**都不是机密**（公钥本来就是公开的），但**必须是你自己那套** —— 填错的话，AI 会把你的软件接到别人的授权服务器上。
+> 反过来说：**私钥（`LICENSE_KEY_*`）和管理口令（`ADMIN_TOKEN`）绝对不要写进配置文件**，它们只存在于 Cloudflare Worker 的 Secrets 里。
+
+配置没填好时脚本会直接拒绝运行，并提示哪一步没做 —— 不会带着占位符把程序接到不存在的地址上。
+
+### 之后怎么用
+
+在任意项目里对 AI 说「给这个项目加上 license-guard 授权验证」，它就会按 `SKILL.md` 的五步流程跑完，最后交付给你三件事：**授权码放哪、后台地址是什么、客户到期了怎么续**。
+
+> 💡 **进阶**：把 `ADMIN_TOKEN` 放进环境变量 `LICENSE_GUARD_ADMIN_TOKEN`，AI 就能直接调后台接口帮你**建产品、签发授权码、改到期时间**，全程不用点网页。
+
+### Skill 里有什么
+
+| 路径 | 内容 |
+|---|---|
+| [`SKILL.md`](skill/SKILL.md) | 五步接入流程 + 三端注入代码 + 关键约定 |
+| `config.json` | 部署配置：服务地址、公钥、后台地址、默认策略 |
+| `references/integration.md` | 三端完整接入指南（配置项、错误码表、Electron / WPF、内网、打包、换机解绑） |
+| `references/api.md` | Worker HTTP API 契约：请求响应结构、令牌载荷、限流、错误码 |
+| `references/admin.md` | 后台运维：建产品、发码、改期、吊销、解绑设备（含 curl 示例） |
+| `scripts/install_sdk.py` | 探测语言 + 拷贝 SDK + 生成配置常量 |
+| `scripts/selfcheck.py` | 校验服务地址 / `app_id` / 公钥是否与服务端匹配 |
+| `assets/clients/` | 三端 SDK 源码（与 [`clients/`](clients/) 同源，零依赖） |
+
+> `selfcheck.py` 有个小设计值得一提：它靠**验签 `GET /v1/time` 返回的令牌**来证明「你内嵌的公钥 == 服务端正在用的私钥」。所以自检**不消耗授权码、不占设备位**。
+
+---
+
 ## 核心设计：为什么它绕不过去
 
 到期时间写在 **服务端签名的令牌**里，客户端只内嵌公钥 —— 改一个字节签名就失效。围绕它还有五道闸：
@@ -237,6 +314,13 @@ license-guard/
 │   ├── python/license_guard.py    Python（自带纯 Python Ed25519 验签）
 │   ├── node/license-guard.js      Node / Electron
 │   └── dotnet/LicenseGuard.cs     C# / .NET / WPF / WinForms
+│
+├── skill/                         AI Skill：一句话把授权接进任意项目
+│   ├── SKILL.md                   五步接入流程
+│   ├── config.json                ★ 你的部署地址与公钥（接入前先改这里）
+│   ├── references/                接入指南 / API 契约 / 后台运维
+│   ├── scripts/                   语言探测 + SDK 安装 + 自检
+│   └── assets/clients/            三端 SDK（与 clients/ 同源）
 │
 └── docs/
     ├── DEPLOY.md                  部署指南（一步步来）
@@ -348,6 +432,7 @@ eyJ2IjoxLCJzdWIiOiJsaWNfYTFiMmMzIiwibWlkIjoiMjY4YThiMTRlYTZm...
 - **[docs/DEPLOY.md](docs/DEPLOY.md)** —— 从零开始部署，含每一步的预期输出和排错
 - **[docs/INTEGRATION.md](docs/INTEGRATION.md)** —— 三端 SDK 完整参数说明、命令行工具 / GUI 程序 / 内网离线环境的接法
 - **[docs/SECURITY.md](docs/SECURITY.md)** —— 能防住什么、防不住什么、怎么继续加固
+- **[skill/SKILL.md](skill/SKILL.md)** —— AI Skill 的五步接入流程与三端注入代码
 
 ---
 

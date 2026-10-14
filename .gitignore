@@ -42,6 +42,11 @@ Thumbs.db
 state.dat
 license.key
 
+# Skill 的【真实】部署配置 —— 仓库里的 skill/config.json 是占位模板，
+# 真实值请写在 config.local.json 里（脚本会优先读它，且不会被提交）
+skill/config.local.json
+config.local.json
+
 # ============================================================
 #  数据库导出 / 备份 —— 含明文授权码、客户名、机器指纹、IP、审计日志
 #  绝不允许提交（曾误提交 license-backup.sql，已从历史中彻底清除）

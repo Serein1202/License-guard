@@ -1,0 +1,19 @@
+{
+  "name": "@yourorg/license-guard",
+  "version": "1.0.0",
+  "description": "License Guard 客户端 SDK（Node.js / Electron）—— 服务端下发到期时间，到期直接退出",
+  "type": "module",
+  "main": "license-guard.js",
+  "exports": {
+    ".": "./license-guard.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "license-guard.js",
+    "README.md"
+  ],
+  "keywords": ["license", "licensing", "activation", "cloudflare-workers", "electron"],
+  "license": "MIT"
+}
