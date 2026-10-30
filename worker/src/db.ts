@@ -248,6 +248,53 @@ export async function listActivations(env: Env, licenseId: string): Promise<Acti
   return r.results ?? [];
 }
 
+/**
+ * 把旧版指纹的激活记录迁移到新指纹。
+ *
+ * 改版历史：v1 指纹把 MachineName / OSVersion / arch 也拼进了哈希，
+ * 用户改电脑名或升级系统就会导致指纹漂移、白占一个设备位。
+ * v2 指纹去掉了这些可变因子，因此老客户端升级后上报的是新 machine_id。
+ * 这里让服务端认旧账：命中旧记录就地把 machine_id 改成新值，用户无感。
+ *
+ * @param machineId 当前（新）指纹
+ * @param legacyMachineId 旧算法算出的指纹，客户端通过 machine_id_alt 上报
+ * @returns 规范化的 machine_id，后续所有判定与令牌都用它
+ */
+export async function resolveMachineId(
+  env: Env,
+  licenseId: string,
+  machineId: string,
+  legacyMachineId?: string | null,
+): Promise<string> {
+  const legacy = (legacyMachineId || "").trim();
+  if (!legacy || legacy === machineId) return machineId;
+
+  // 新指纹已经是规范 ID，无需迁移
+  if (await getActivation(env, licenseId, machineId)) return machineId;
+  if (!(await getActivation(env, licenseId, legacy))) return machineId;
+
+  // UPDATE OR IGNORE：新指纹若已被同授权下的另一条记录占用则放弃迁移，
+  // 让上层按正常流程判定（通常是 DEVICE_LIMIT），不覆盖别人的记录。
+  await env.DB.prepare(
+    "UPDATE OR IGNORE activations SET machine_id = ?1 WHERE license_id = ?2 AND machine_id = ?3",
+  )
+    .bind(machineId, licenseId, legacy)
+    .run();
+
+  return machineId;
+}
+
+export type UpsertActivationResult = "ok" | "device_limit";
+
+/**
+ * 写入/刷新一条激活记录，并保证不超出设备位上限。
+ *
+ * 计数与写入必须在**同一条 SQL** 内完成：拆成 countActivations() + INSERT 两步的话，
+ * 两台设备并发首次激活同一授权码会同时通过检查，实际设备数超过 max_devices。
+ * SQLite 的单条写语句是原子的，D1 会把并发写串行化，第二个执行时 COUNT 已包含第一个。
+ *
+ * @param maxDevices 该授权允许的设备数；传 null 表示不做上限约束（仅用于已激活设备的续期）
+ */
 export async function upsertActivation(
   env: Env,
   a: {
@@ -259,12 +306,17 @@ export async function upsertActivation(
     ip?: string | null;
     country?: string | null;
   },
-): Promise<void> {
+  maxDevices: number | null = null,
+): Promise<UpsertActivationResult> {
   const ts = nowSec();
+  const limit = maxDevices === null ? Number.MAX_SAFE_INTEGER : Math.max(0, Math.floor(maxDevices));
+
   await env.DB.prepare(
     `INSERT INTO activations
        (id, license_id, machine_id, machine_name, app_version, platform, ip, country, activated_at, last_seen_at)
-     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)
+     SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?9
+      WHERE EXISTS (SELECT 1 FROM activations WHERE license_id = ?2 AND machine_id = ?3)
+         OR (SELECT COUNT(*) FROM activations WHERE license_id = ?2) < ?10
      ON CONFLICT(license_id, machine_id) DO UPDATE SET
        last_seen_at = excluded.last_seen_at,
        machine_name = COALESCE(excluded.machine_name, activations.machine_name),
@@ -283,8 +335,13 @@ export async function upsertActivation(
       a.ip ?? null,
       a.country ?? null,
       ts,
+      limit,
     )
     .run();
+
+  // 复检：语句执行后仍查不到本设备，只可能是被设备数上限挡掉了
+  const act = await getActivation(env, a.licenseId, a.machineId);
+  return act ? "ok" : "device_limit";
 }
 
 export async function deleteActivation(env: Env, id: string): Promise<void> {

@@ -188,32 +188,141 @@ def ecdsa_p256_verify(public_key: bytes, signature: bytes, message: bytes) -> bo
 # ══════════════════════════════════════════════════════════════════
 
 _machine_cache: Optional[str] = None
+_legacy_cache: Optional[str] = None
+
+
+def _win_reg_value(sub: str, name: str) -> Optional[str]:
+    """读 HKLM 下一个注册表字符串值，失败返回 None。"""
+    try:
+        import winreg  # type: ignore
+        for access in (winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0), winreg.KEY_READ):
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub, 0, access)
+                try:
+                    val, _ = winreg.QueryValueEx(key, name)
+                finally:
+                    winreg.CloseKey(key)
+                if val:
+                    return str(val).strip()
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _win_volume_serial() -> Optional[str]:
+    """系统盘卷序列号（8 位十六进制）。重灌系统会变，属可接受的硬件级变化。"""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import ctypes
+        serial = ctypes.c_uint32()
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(  # type: ignore[attr-defined]
+            ctypes.c_wchar_p("C:\\"), None, 0,
+            ctypes.byref(serial), None, None, None, 0,
+        )
+        if ok and serial.value:
+            return "%08X" % serial.value
+    except Exception:
+        pass
+    return None
+
+
+def _unix_machine_id() -> Optional[str]:
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id", "/sys/class/dmi/id/product_uuid"):
+        try:
+            v = Path(path).read_text(encoding="utf-8", errors="ignore").strip()
+            if v:
+                return v
+        except Exception:
+            continue
+    if platform.system() == "Darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.uuid"], stderr=subprocess.DEVNULL, timeout=5
+            ).decode("utf-8", "ignore").strip()
+            if out:
+                return out
+        except Exception:
+            pass
+    return None
+
+
+def _physical_mac() -> Optional[str]:
+    """第一个物理网卡 MAC；排除随机 MAC 与常见虚拟网卡网段。"""
+    try:
+        node = uuid.getnode()
+        if node and not (node >> 40) & 0x01:      # 排除随机生成的伪造 MAC
+            return "%012x" % node
+    except Exception:
+        pass
+    return None
 
 
 def _hardware_tokens() -> list:
-    """尽量收集稳定且跨重启不变的标识"""
+    """v2 指纹因子：只取硬件级、跨重启与跨系统升级都稳定的标识。
+
+    刻意不参与哈希的项：主机名（改电脑名就变）、OS 版本（升级系统就变）、
+    CPU 架构（换运行环境就变）。它们只会造成正版用户白掉一次激活。
+    """
+    tokens: list = []
+    stable = False
+    system = platform.system()
+
+    if system == "Windows":
+        for key_path, name, prefix in (
+            (r"HARDWARE\DESCRIPTION\System\BIOS", "SystemProductName", "prod"),
+            (r"HARDWARE\DESCRIPTION\System\BIOS", "BaseBoardProduct", "board"),
+            (r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "Identifier", "cpu"),
+            (r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString", "cpuname"),
+        ):
+            v = _win_reg_value(key_path, name)
+            if v:
+                tokens.append(prefix + ":" + v)
+                if prefix in ("prod", "board"):
+                    stable = True
+
+        vol = _win_volume_serial()
+        if vol:
+            tokens.append("vol:" + vol)
+            stable = True
+
+        # MachineGuid 可改，只是弱因子之一，不作为唯一依据
+        guid = _win_reg_value(r"SOFTWARE\Microsoft\Cryptography", "MachineGuid")
+        if guid:
+            tokens.append("guid:" + guid.lower())
+            stable = True
+    else:
+        mid = _unix_machine_id()
+        if mid:
+            tokens.append("id:" + mid)
+            stable = True
+
+    # 只有硬件因子一个都没取到时才用 MAC 兜底，避免正常情况下换网卡就漂移
+    if not stable:
+        mac = _physical_mac()
+        if mac:
+            tokens.append("mac:" + mac)
+
+    return tokens
+
+
+def _legacy_tokens() -> list:
+    """v1 指纹因子：逐字复刻历史算法，不能改。
+
+    上线版本里 Windows 只取 MachineGuid、macOS 取 IOPlatformUUID、
+    Linux 取 machine-id，再无条件下挂 MAC，最后拼 host 与 arch。
+    只要这里算出的值与老客户端不一致，服务端就认领不回旧激活记录，
+    用户升级后会白白占掉一个设备位。
+    """
     tokens: list = []
     system = platform.system()
 
     if system == "Windows":
-        try:
-            import winreg  # type: ignore
-            for access in (winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0), winreg.KEY_READ):
-                try:
-                    key = winreg.OpenKey(
-                        winreg.HKEY_LOCAL_MACHINE,
-                        r"SOFTWARE\Microsoft\Cryptography",
-                        0,
-                        access,
-                    )
-                    val, _ = winreg.QueryValueEx(key, "MachineGuid")
-                    if val:
-                        tokens.append("guid:" + str(val))
-                        break
-                except OSError:
-                    continue
-        except Exception:
-            pass
+        guid = _win_reg_value(r"SOFTWARE\Microsoft\Cryptography", "MachineGuid")
+        if guid:
+            tokens.append("guid:" + guid)
 
     elif system == "Darwin":
         try:
@@ -238,13 +347,10 @@ def _hardware_tokens() -> list:
             except Exception:
                 continue
 
-    # 通用兜底
-    try:
-        node = uuid.getnode()
-        if node and not (node >> 40) & 0x01:   # 排除随机生成的伪造 MAC
-            tokens.append("mac:%012x" % node)
-    except Exception:
-        pass
+    # v1 的 MAC 是无条件兜底
+    mac = _physical_mac()
+    if mac:
+        tokens.append("mac:" + mac)
 
     tokens.append("host:" + platform.node())
     tokens.append("arch:" + platform.machine())
@@ -259,6 +365,16 @@ def machine_id() -> str:
     raw = "|".join(_hardware_tokens())
     _machine_cache = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
     return _machine_cache
+
+
+def legacy_machine_id() -> str:
+    """旧版指纹，随请求上报为 machine_id_alt，用于激活记录迁移。"""
+    global _legacy_cache
+    if _legacy_cache:
+        return _legacy_cache
+    raw = "|".join(_legacy_tokens())
+    _legacy_cache = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    return _legacy_cache
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -295,8 +411,13 @@ class GuardConfig:
     retry_times: int = 2
     heartbeat_sec: int = 21600
     watchdog_interval_sec: int = 120
-    """看门狗检查间隔；到期后最多这么久就会闪退。
-    传 0 = 不指定，跟随后端下发的 heartbeat_sec（服务端心跳间隔）"""
+    """看门狗检查间隔（秒）。
+
+    >0 = 固定间隔：每一轮都按这个值复查，不会被后端下发的 heartbeat_sec 覆盖。
+         到期后最多这么久就会闪退。需要精确控制到期行为时用这个。
+     0 = 跟随后端 heartbeat_sec（后端是唯一权威），可用 heartbeat_cap_sec 夹上限。
+
+    下限恒为 15 秒：防止配置失误把服务端打爆。"""
 
     online_check_interval_sec: int = 0
     """缓存令牌允许「免联网直接放行」的最长时长（秒）。
@@ -662,6 +783,8 @@ class LicenseGuard:
                 "app_id": self.app_id,
                 "key": raw_key,
                 "machine_id": self.machine_id,
+                # 旧版指纹：让服务端认领升级前的激活记录，避免因指纹改版白掉一次激活
+                "machine_id_alt": legacy_machine_id(),
                 "machine_name": platform.node(),
                 "platform": platform.system().lower(),
                 "app_version": _app_version(),
@@ -833,10 +956,7 @@ class LicenseGuard:
         self._stop.clear()
 
         def loop() -> None:
-            # 首个间隔：本地未指定（<=0）时跟随后端下发的心跳间隔
-            first = int(self.cfg.watchdog_interval_sec or 0) or \
-                int(self._state.get("heartbeat_sec") or 0) or self.cfg.heartbeat_sec
-            interval = max(15, first)
+            interval = self._watchdog_interval(first=True)
             while not self._stop.wait(interval):
                 try:
                     info = self.verify()
@@ -857,14 +977,24 @@ class LicenseGuard:
         self._watchdog = threading.Thread(target=loop, name="license-guard-watchdog", daemon=True)
         self._watchdog.start()
 
-    def _watchdog_interval(self, hb: Optional[int] = None) -> int:
+    def _watchdog_interval(self, first: bool = False) -> int:
         """看门狗下一次复查要等多久（秒）。
 
-        取后端下发的心跳间隔；heartbeat_cap_sec > 0 时在本地再夹一个上限
-        （0 = 不封顶，完全由后端说了算）。下限 15 秒防止把服务端打爆。
+        语义（与 watchdog_interval_sec 的文档保持一致）：
+
+        - watchdog_interval_sec > 0：**固定间隔**，每轮都用这个值，
+          不会被后端下发的 heartbeat_sec 覆盖。需要"到点就退"的场景用这个。
+          下限 15 秒，防止把服务端打爆。
+        - watchdog_interval_sec = 0：跟随后端 heartbeat_sec（后端是唯一权威）；
+          heartbeat_cap_sec > 0 时在本地再夹一个上限。
+
+        首轮还没有任何本地状态，只能先看本地配置，拿不到再退回默认 heartbeat_sec。
         """
-        if hb is None:
-            hb = int(self._state.get("heartbeat_sec") or self.cfg.heartbeat_sec)
+        fixed = int(self.cfg.watchdog_interval_sec or 0)
+        if fixed > 0:
+            return max(15, fixed)
+
+        hb = int(self._state.get("heartbeat_sec") or 0) or int(self.cfg.heartbeat_sec or 0) or 21600
         cap = int(self.cfg.heartbeat_cap_sec or 0)
         return max(15, hb if cap <= 0 else min(hb, cap))
 
@@ -892,6 +1022,7 @@ class LicenseGuard:
             "app_id": self.app_id,
             "key": raw_key,
             "machine_id": self.machine_id,
+            "machine_id_alt": legacy_machine_id(),
         })
         if resp and resp.get("ok"):
             self.store.clear()

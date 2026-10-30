@@ -124,18 +124,29 @@ LGST1:<hmac-sha256 十六进制>
 
 ### 3.3 防设备复制
 
-令牌里的 `mid` 字段是硬件指纹：
+令牌里的 `mid` 字段是硬件指纹。当前为 **v2 算法**，只采集硬件级、跨重启与跨系统升级都稳定的因子：
 
 | 系统 | 采集来源（按优先级） |
 |---|---|
-| Windows | 注册表 `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` |
-| macOS | `ioreg` 的 `IOPlatformUUID` |
-| Linux | `/etc/machine-id` → `/var/lib/dbus/machine-id` → DMI product_uuid |
-| 通用兜底 | 物理网卡 MAC（排除虚拟机网段）+ 主机名 + 架构 |
+| Windows | BIOS `SystemProductName` + `BaseBoardProduct`、CPU `Identifier`/`ProcessorNameString`、系统盘卷序列号、注册表 `MachineGuid` |
+| macOS | `ioreg` 的 `IOPlatformUUID`（等价 `sysctl -n hw.uuid`） |
+| Linux | `/etc/machine-id` → `/var/lib/dbus/machine-id` → DMI `product_uuid` |
+| 通用兜底 | 物理网卡 MAC（排除随机 MAC 与虚拟机网段）——**仅在上面全部取不到时才使用** |
 
-服务端记录每台设备的激活，超出 `max_devices` 直接拒绝。
+v1 算法曾把**主机名**、**OS 版本**、**CPU 架构**也拼进哈希。问题是这些字段用户改个电脑名、升级一次 Windows 就会变，
+正版用户会因此被判成"新设备"、白占一个设备位，单机授权直接卡在 `DEVICE_LIMIT`。v2 已移除这些可变因子。
 
-**局限**：虚拟机克隆会让多台机器共享同一个 MachineGuid。如果你的场景需要区分虚拟机，再加上磁盘序列号/CPU ID 组合。
+> **升级提示**：v2 指纹与 v1 不同，老客户端升级 SDK 后 `machine_id` 会变。
+> 三端 SDK 会同时上报旧指纹（字段名 `machine_id_alt`），服务端命中旧激活记录时就地把 `machine_id` 改成新值
+> （`db.ts::resolveMachineId`），用户无感，不会掉激活。**旧版 SDK 不含该字段，服务端与新版 SDK 均可正常处理。**
+
+服务端记录每台设备的激活，超出 `max_devices` 直接拒绝。计数与写入在**同一条 SQL** 内完成
+（`db.ts::upsertActivation`），两台设备同时首次激活不会同时通过检查——拆成"先查数量再写入"两步会留下并发窗口，
+导致实际设备数超过 `max_devices`。
+
+**局限**：这些因子都不是不可篡改的硬件身份证明。虚拟机克隆会共享同一组标识；
+`MachineGuid` 与卷序列号都能改。指纹的作用是提高"复制目录盗用"的成本，
+拦不住会改程序、会伪造请求的人——那属于加壳/混淆要解决的问题。
 
 ### 3.4 防长期离线白嫖
 
@@ -149,6 +160,19 @@ LGST1:<hmac-sha256 十六进制>
 | `offline_grace_days` | 7 | 断网多久后失效 | 出差/无网环境用户会投诉 |
 
 **想快速吊销就调小 `token_ttl_sec`。** 想在管理后台封禁后 1 小时内生效，就设成 3600。
+
+**后台封禁不是绝对即时生效的**，这是一处有意的设计取舍：
+客户端手里只要还握着一份未过期的缓存令牌，就能先在本地通过检查；连不上服务器时还能按离线策略继续用。
+允许短期断网，就不可能同时保证任何后台操作都立刻传达到客户端。
+
+最坏生效延迟可以估算：
+
+```
+后台操作生效所需时间 ≈ token_ttl_sec + offline_grace_days × 86400
+```
+
+默认值下为 24 小时 + 7 天。想压缩到 1 小时内：`token_ttl_sec=3600`、`offline_grace_days=0`。
+代价是联网更频繁，且断网时更容易直接起不来——按你的用户场景权衡。
 
 ### 3.5 到期后立即停止运行
 
@@ -168,6 +192,18 @@ def _terminate(mode, code, message, err_code):
 - `os._exit()` 直接调系统调用终止进程，不执行任何清理
 
 `watchdog_interval_sec` 决定「到期后最多多久才退出」，默认 120 秒。设成 15 秒能让到期几乎瞬时生效。
+
+间隔语义（三端一致）：
+
+| 配置 | 行为 |
+|---|---|
+| `watchdog_interval_sec > 0` | **固定间隔**，每轮都按这个值复查，不被后端下发的 `heartbeat_sec` 覆盖。需要精确控制到期行为时用这个 |
+| `watchdog_interval_sec = 0` | 跟随后端 `heartbeat_sec`（后端是唯一权威），可用 `heartbeat_cap_sec` / `heartbeatCapSec` 在本地夹上限 |
+
+下限恒为 15 秒，防止配置失误把服务端打爆。
+
+> 历史版本（v1）在这里有实现缺陷：Python 端首次成功后会改用 `heartbeat_sec`（默认 6 小时）作为间隔，
+> Node 端会改用 `min(heartbeat_sec, 900)`，配置的 15 秒/120 秒都不生效。v2 已修正为「显式配置即固定间隔」。
 
 ---
 

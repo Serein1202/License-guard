@@ -8,6 +8,7 @@ import {
   getLicenseByKeyHash,
   getProductByAppId,
   deleteActivationByMachine,
+  resolveMachineId,
   upsertActivation,
   audit,
 } from "../db";
@@ -29,6 +30,8 @@ interface ActivateBody {
   key?: string;
   license_key?: string;
   machine_id?: string;
+  /** 旧版算法算出的指纹：服务端据此把老激活记录迁移到新指纹，避免用户白掉一次激活 */
+  machine_id_alt?: string;
   machine_name?: string;
   app_version?: string;
   platform?: string;
@@ -137,33 +140,48 @@ export async function handleActivate(req: Request, env: Env, url: URL): Promise<
     return fail("KEY_NOT_FOUND", "授权码不存在", 404);
   }
 
-  const verdict = await evaluate(env, { product, license, machineId, requireActivation: false });
+  // v1 指纹升级到 v2 后 machine_id 会变，这里先认旧账再判定，避免老用户被当成新设备
+  const effectiveMachineId = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+
+  const verdict = await evaluate(env, { product, license, machineId: effectiveMachineId, requireActivation: false });
   if (!verdict.allowed) {
     await audit(env, { actor: "app", action: "activate.deny", target: license.id, detail: verdict.code, ip: meta.ip });
     // 拒绝时也下发策略快照：客户端据此执行「到期时的行为」/ 退出码等后端设置
     return deny(verdict.code, verdict.message, 403, verdict.policy);
   }
 
-  await upsertActivation(env, {
-    licenseId: license.id,
-    machineId,
-    machineName: body.machine_name ?? null,
-    appVersion: body.app_version ?? null,
-    platform: body.platform ?? null,
-    ip: meta.ip,
-    country: meta.country,
-  });
+  // 计数 + 写入在同一条 SQL 内完成，杜绝并发激活超发
+  const maxDevices = license.max_devices ?? product.max_devices ?? 1;
+  const written = await upsertActivation(
+    env,
+    {
+      licenseId: license.id,
+      machineId: effectiveMachineId,
+      machineName: body.machine_name ?? null,
+      appVersion: body.app_version ?? null,
+      platform: body.platform ?? null,
+      ip: meta.ip,
+      country: meta.country,
+    },
+    maxDevices,
+  );
+
+  // evaluate 与 upsert 之间被别的设备抢走了最后一个名额
+  if (written === "device_limit") {
+    await audit(env, { actor: "app", action: "activate.deny", target: license.id, detail: "DEVICE_LIMIT", ip: meta.ip });
+    return deny("DEVICE_LIMIT", `授权设备数已达上限（${maxDevices}），请先在后台解绑其他设备`, 403, verdict.policy);
+  }
 
   let features: string[] = [];
   try {
     features = JSON.parse(product.features || "[]") as string[];
   } catch { /* ignore */ }
 
-  await audit(env, { actor: "app", action: "activate.ok", target: license.id, detail: { machineId, platform: body.platform }, ip: meta.ip });
+  await audit(env, { actor: "app", action: "activate.ok", target: license.id, detail: { machineId: effectiveMachineId, platform: body.platform }, ip: meta.ip });
 
   return json(
     await buildActivationResponse(
-      env, product, license.id, machineId, license.customer, features, verdict,
+      env, product, license.id, effectiveMachineId, license.customer, features, verdict,
       await countActivations(env, license.id),
     ),
   );
@@ -193,16 +211,18 @@ export async function handleVerify(req: Request, env: Env, url: URL): Promise<Re
 
   // 注意：verify 不会占用新的设备位。
   // 未激活过的设备必须先走 /v1/activate，否则这里返回 DEVICE_NOT_ACTIVATED。
-  const verdict = await evaluate(env, { product, license, machineId, requireActivation: true });
+  const effectiveMachineId = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  const verdict = await evaluate(env, { product, license, machineId: effectiveMachineId, requireActivation: true });
   if (!verdict.allowed) {
     await audit(env, { actor: "app", action: "verify.deny", target: license.id, detail: verdict.code, ip: meta.ip });
     // 同上：让客户端在「被拒」这条路径上也能跟随后端设置
     return deny(verdict.code, verdict.message, 403, verdict.policy);
   }
 
+  // 已激活设备刷新 last_seen_at，不参与设备数竞争，故不传上限
   await upsertActivation(env, {
     licenseId: license.id,
-    machineId,
+    machineId: effectiveMachineId,
     machineName: body.machine_name ?? null,
     appVersion: body.app_version ?? null,
     platform: body.platform ?? null,
@@ -217,7 +237,7 @@ export async function handleVerify(req: Request, env: Env, url: URL): Promise<Re
 
   return json(
     await buildActivationResponse(
-      env, product, license.id, machineId, license.customer, features, verdict,
+      env, product, license.id, effectiveMachineId, license.customer, features, verdict,
       await countActivations(env, license.id),
     ),
   );
@@ -242,8 +262,10 @@ export async function handleDeactivate(req: Request, env: Env, url: URL): Promis
   const license = await getLicenseByKeyHash(env, await hashKey(rawKey));
   if (!license || license.product_id !== product.id) return fail("KEY_NOT_FOUND", "授权码不存在", 404);
 
-  await deleteActivationByMachine(env, license.id, machineId);
-  await audit(env, { actor: "app", action: "deactivate", target: license.id, detail: { machineId }, ...clientMeta(req) });
+  // 老记录可能还挂在旧指纹上，先迁移再解绑，否则解不干净
+  const effectiveMachineId = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  await deleteActivationByMachine(env, license.id, effectiveMachineId);
+  await audit(env, { actor: "app", action: "deactivate", target: license.id, detail: { machineId: effectiveMachineId }, ...clientMeta(req) });
   return json({ released: true });
 }
 

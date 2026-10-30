@@ -64,20 +64,119 @@ function nowSec() {
    ══════════════════════════════════════════════════════════════ */
 
 let _machineCache = null;
+let _legacyCache = null;
 
+/**
+ * v2 指纹因子：只取硬件级、跨重启与跨系统升级都稳定的标识。
+ * 刻意不参与哈希：主机名（改电脑名就变）、CPU 架构与系统版本（换运行环境就变）。
+ * 这些只会让正版用户白掉一次激活，拦不住真正会改程序的人。
+ */
 function hardwareTokens() {
+  const tokens = [];
+  const p = platform();
+  let stable = false;
+
+  if (p === "win32") {
+    // 一次 PowerShell 调用把注册表里的硬件标识全部取回，避免逐个起进程
+    const script = [
+      "$ErrorActionPreference='SilentlyContinue'",
+      "$b=Get-ItemProperty -Path 'HKLM:\\HARDWARE\\DESCRIPTION\\System\\BIOS'",
+      "$c=Get-ItemProperty -Path 'HKLM:\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0'",
+      "$g=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid",
+      "Write-Output \"board=$($b.BaseBoardProduct)\"",
+      "Write-Output \"prod=$($b.SystemProductName)\"",
+      "Write-Output \"cpu=$($c.Identifier)\"",
+      "Write-Output \"cpuname=$($c.ProcessorNameString)\"",
+      "Write-Output \"guid=$g\"",
+    ].join("; ");
+    for (const [cmd, args] of [
+      ["powershell", ["-NoProfile", "-NonInteractive", "-Command", script]],
+      ["reg", ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"]],
+    ]) {
+      try {
+        const out = execFileSync(cmd, args, { encoding: "utf8", timeout: 8000, windowsHide: true });
+        const guid = (out.match(/guid=([0-9a-fA-F-]{36})/)
+          || out.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/));
+        const board = out.match(/board=(.*)/);
+        const prod = out.match(/prod=(.*)/);
+        const cpu = out.match(/cpu=(.*)/);
+        const cpuname = out.match(/cpuname=(.*)/);
+        if (board && board[1].trim()) { tokens.push("board:" + board[1].trim()); stable = true; }
+        if (prod && prod[1].trim()) { tokens.push("prod:" + prod[1].trim()); stable = true; }
+        if (cpu && cpu[1].trim()) tokens.push("cpu:" + cpu[1].trim());
+        if (cpuname && cpuname[1].trim()) tokens.push("cpuname:" + cpuname[1].trim());
+        if (guid) { tokens.push("guid:" + guid[1].trim().toLowerCase()); stable = true; break; }
+        if (guid === null && board === null) continue;
+      } catch { /* 换下一个 */ }
+    }
+
+    // 系统盘卷序列号：cmd vol 在中英文系统上都会输出 4-4 位十六进制
+    try {
+      const root = (process.env.SystemDrive || "C:").slice(0, 2) + "\\";
+      const out = execFileSync("cmd", ["/c", "vol", root], { encoding: "utf8", timeout: 5000, windowsHide: true });
+      const m = out.match(/([0-9a-fA-F]{4})-([0-9a-fA-F]{4})/);
+      if (m) { tokens.push("vol:" + (m[1] + m[2]).toUpperCase()); stable = true; }
+    } catch { /* ignore */ }
+  } else if (p === "darwin") {
+    try {
+      const out = execFileSync("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"],
+        { encoding: "utf8", timeout: 8000 });
+      const m = out.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+      if (m) { tokens.push("uuid:" + m[1]); stable = true; }
+    } catch { /* ignore */ }
+  } else {
+    for (const f of ["/etc/machine-id", "/var/lib/dbus/machine-id", "/sys/class/dmi/id/product_uuid"]) {
+      try {
+        const v = readFileSync(f, "utf8").trim();
+        if (v) { tokens.push("id:" + v); stable = true; break; }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // 硬件因子一个都没取到时才用 MAC 兜底，避免正常情况下换网卡就漂移
+  if (!stable) {
+    const mac = firstPhysicalMac();
+    if (mac) tokens.push("mac:" + mac);
+  }
+
+  return tokens;
+}
+
+function firstPhysicalMac() {
+  try {
+    const macs = [];
+    for (const name of Object.keys(networkInterfaces())) {
+      for (const ni of networkInterfaces()[name] || []) {
+        if (ni.internal || !ni.mac || ni.mac === "00:00:00:00:00:00") continue;
+        // 第二个字节 bit1 = 1 是本地管理地址（随机 MAC），会漂移，不能用
+        const parts = ni.mac.split(":");
+        if (parts.length === 6 && (parseInt(parts[1], 16) & 0x02)) continue;
+        if (/^(00:15:5d|00:50:56|08:00:27|52:54:00|00:1c:42|0a:00:27)/i.test(ni.mac)) continue; // 虚拟机
+        macs.push(ni.mac.toLowerCase());
+      }
+    }
+    macs.sort();
+    return macs[0] || null;
+  } catch { return null; }
+}
+
+/**
+ * v1 指纹因子：逐字复刻历史算法，不能改。
+ * 上线版本的构成是「平台唯一标识 + MAC + hostname + arch」，
+ * 这里算出的值一旦与老客户端不一致，服务端就认领不回旧激活记录。
+ */
+function legacyTokens() {
   const tokens = [];
   const p = platform();
 
   if (p === "win32") {
-    // wmic 在新系统上已移除，优先用 PowerShell 读注册表
-    for (const cmd of [
+    for (const [cmd, args] of [
       ["powershell", ["-NoProfile", "-NonInteractive", "-Command",
         "(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography' -Name MachineGuid).MachineGuid"]],
       ["reg", ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"]],
     ]) {
       try {
-        const out = execFileSync(cmd[0], cmd[1], { encoding: "utf8", timeout: 8000, windowsHide: true });
+        const out = execFileSync(cmd, args, { encoding: "utf8", timeout: 8000, windowsHide: true });
         const m = out.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/);
         if (m) { tokens.push("guid:" + m[0].toLowerCase()); break; }
       } catch { /* 换下一个 */ }
@@ -98,20 +197,9 @@ function hardwareTokens() {
     }
   }
 
-  // 网卡 MAC（挑第一个非内部、非常见虚拟网段的）
-  try {
-    const nets = networkInterfaces();
-    const macs = [];
-    for (const name of Object.keys(nets)) {
-      for (const ni of nets[name] || []) {
-        if (ni.internal || !ni.mac || ni.mac === "00:00:00:00:00:00") continue;
-        if (/^(00:15:5d|00:50:56|08:00:27|52:54:00|00:1c:42)/i.test(ni.mac)) continue; // 虚拟机
-        macs.push(ni.mac.toLowerCase());
-      }
-    }
-    macs.sort();
-    if (macs.length) tokens.push("mac:" + macs[0]);
-  } catch { /* ignore */ }
+  // v1 的 MAC 是无条件兜底
+  const mac = firstPhysicalMac();
+  if (mac) tokens.push("mac:" + mac);
 
   tokens.push("host:" + hostname());
   tokens.push("arch:" + arch() + ":" + p);
@@ -121,9 +209,15 @@ function hardwareTokens() {
 /** 32 位十六进制硬件指纹 */
 export function machineId() {
   if (_machineCache) return _machineCache;
-  const raw = hardwareTokens().join("|");
-  _machineCache = createHash("sha256").update(raw).digest("hex").slice(0, 32);
+  _machineCache = createHash("sha256").update(hardwareTokens().join("|")).digest("hex").slice(0, 32);
   return _machineCache;
+}
+
+/** 旧版指纹，随请求上报为 machine_id_alt，用于激活记录迁移 */
+export function legacyMachineId() {
+  if (_legacyCache) return _legacyCache;
+  _legacyCache = createHash("sha256").update(legacyTokens().join("|")).digest("hex").slice(0, 32);
+  return _legacyCache;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -306,7 +400,8 @@ export class LicenseGuard {
       requestTimeoutMs: 8000,
       retryTimes: 3,
       heartbeatSec: 21600,
-      watchdogIntervalSec: 120,  // 到期后最多这么久就会退出
+      watchdogIntervalSec: 120,  // >0 = 固定复查间隔（不被后端心跳覆盖）；0 = 跟随后端 heartbeatSec
+      heartbeatCapSec: 900,      // 仅在 watchdogIntervalSec = 0 时生效：本地复查间隔上限
       storageDir: null,
       onDenied: null,            // (code, message) => void；设了它就不会自动退出
       debug: false,
@@ -472,6 +567,8 @@ export class LicenseGuard {
       app_id: this.opts.appId,
       key: rawKey,
       machine_id: this.machineId,
+      // 旧版指纹：让服务端认领升级前的激活记录，避免因指纹改版白掉一次激活
+      machine_id_alt: legacyMachineId(),
       machine_name: hostname(),
       platform: platform(),
       app_version: VERSION,
@@ -558,18 +655,32 @@ export class LicenseGuard {
     }
   }
 
+  /**
+   * 看门狗下一次复查要等多久（毫秒）。
+   *
+   * - watchdogIntervalSec > 0：固定间隔，每轮都用它，不被后端 heartbeat_sec 覆盖。
+   *   （旧实现会在首次成功后改成 min(heartbeat, 900)，导致配 15 秒实际 15 分钟才复查）
+   * - watchdogIntervalSec <= 0：跟随后端 heartbeat_sec，再用 heartbeatCapSec 夹上限。
+   *
+   * 下限恒为 15 秒，防止配置失误把服务端打爆。
+   */
+  _watchdogDelayMs() {
+    const fixed = Number(this.opts.watchdogIntervalSec || 0);
+    if (fixed > 0) return Math.max(15, fixed) * 1000;
+    const hb = Number(this._state.heartbeat_sec || this.opts.heartbeatSec || 21600);
+    const cap = Number(this.opts.heartbeatCapSec || 0);
+    return Math.max(15, cap > 0 ? Math.min(hb, cap) : hb) * 1000;
+  }
+
   /** 后台看门狗：到期时刻一到，即使程序正在运行也会立刻退出 */
   startWatchdog() {
     if (this._running) return;
     this._running = true;
-    let interval = Math.max(15, this.opts.watchdogIntervalSec) * 1000;
 
     const tick = async () => {
       if (!this._running) return;
       try {
         await this.verify();
-        const hb = Number(this._state.heartbeat_sec || this.opts.heartbeatSec);
-        interval = Math.max(15, Math.min(hb, 900)) * 1000;
       } catch (e) {
         this._log("看门狗: 失败", e.code);
         this._running = false;
@@ -578,10 +689,13 @@ export class LicenseGuard {
         }
         return;
       }
-      if (this._running) this._timer = setTimeout(tick, interval);
+      if (this._running) {
+        this._timer = setTimeout(tick, this._watchdogDelayMs());
+        if (this._timer.unref) this._timer.unref();
+      }
     };
 
-    this._timer = setTimeout(tick, interval);
+    this._timer = setTimeout(tick, this._watchdogDelayMs());
     if (this._timer.unref) this._timer.unref();
   }
 
@@ -607,6 +721,7 @@ export class LicenseGuard {
       app_id: this.opts.appId,
       key: rawKey,
       machine_id: this.machineId,
+      machine_id_alt: legacyMachineId(),
     });
     if (resp && resp.ok) {
       this.store.clear();

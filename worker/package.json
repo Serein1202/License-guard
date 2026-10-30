@@ -30,7 +30,8 @@
     "db:local": "wrangler d1 execute DB --local --file=./schema.sql --yes",
     "db:remote": "wrangler d1 execute DB --remote --file=./schema.sql --yes",
     "keys": "node scripts/gen-keys.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:activation": "python tests/test_activation_atomic.py"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.0.0",

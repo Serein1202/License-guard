@@ -22,8 +22,10 @@
 // =============================================================================
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -63,8 +65,15 @@ public sealed class GuardOptions
     public int RequestTimeoutSeconds { get; set; } = 8;
     public int RetryTimes { get; set; } = 3;
     public int HeartbeatSeconds { get; set; } = 21600;
-    /// <summary>看门狗检查间隔；到期后最多这么久就会退出。</summary>
+    /// <summary>
+    /// 看门狗检查间隔（秒）。
+    /// &gt;0 = 固定间隔，每轮都用它，不被后端下发的 <c>heartbeat_sec</c> 覆盖；
+    /// 0 = 跟随后端心跳。下限恒为 15 秒。
+    /// </summary>
     public int WatchdogIntervalSeconds { get; set; } = 120;
+
+    /// <summary>仅在 <see cref="WatchdogIntervalSeconds"/> = 0 时生效：本地复查间隔上限（秒）。0 = 不封顶。</summary>
+    public int HeartbeatCapSeconds { get; set; } = 900;
 
     public string? StorageDirectory { get; set; }
 
@@ -103,6 +112,7 @@ public sealed class LicenseGuard
 {
     private readonly GuardOptions _o;
     private readonly string _machineId;
+    private readonly string _machineIdLegacy;
     private readonly StateStore _store;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
@@ -112,6 +122,9 @@ public sealed class LicenseGuard
     private volatile bool _running;
 
     public string MachineId => _machineId;
+
+    /// <summary>旧版指纹。上报给服务端用于认领 v1 时代留下的激活记录，用户不会因升级 SDK 掉激活。</summary>
+    public string MachineIdLegacy => _machineIdLegacy;
     public LicenseInfo Info => _info ?? throw new LicenseException("NOT_VERIFIED", "尚未执行校验");
 
     /// <summary>
@@ -129,6 +142,7 @@ public sealed class LicenseGuard
 
         _o.ServerUrl = _o.ServerUrl.TrimEnd('/');
         _machineId = MachineFingerprint.Compute();
+        _machineIdLegacy = MachineFingerprint.ComputeLegacy();
         _store = new StateStore(_o.AppId, _machineId, _o.StorageDirectory);
     }
 
@@ -264,6 +278,7 @@ public sealed class LicenseGuard
             app_id = _o.AppId,
             key = rawKey,
             machine_id = _machineId,
+            machine_id_alt = _machineIdLegacy,
             machine_name = Environment.MachineName,
             platform = "windows",
             app_version = typeof(LicenseGuard).Assembly.GetName().Version?.ToString() ?? "1.0.0",
@@ -346,7 +361,6 @@ public sealed class LicenseGuard
     {
         if (_running) return;
         _running = true;
-        var interval = TimeSpan.FromSeconds(Math.Max(15, _o.WatchdogIntervalSeconds));
 
         _timer = new Timer(async _ =>
         {
@@ -354,9 +368,7 @@ public sealed class LicenseGuard
             try
             {
                 await VerifyAsync().ConfigureAwait(false);
-                var hb = _state.TryGetValue("heartbeat_sec", out var h) ? h.GetInt32() : _o.HeartbeatSeconds;
-                var next = TimeSpan.FromSeconds(Math.Clamp(hb, 15, 900));
-                if (_running) _timer?.Change(next, Timeout.InfiniteTimeSpan);
+                if (_running) _timer?.Change(WatchdogInterval(), Timeout.InfiniteTimeSpan);
             }
             catch (LicenseException ex)
             {
@@ -364,7 +376,26 @@ public sealed class LicenseGuard
                 _running = false;
                 if (_o.OnDenied is null) Terminate(_o.FailMode, _o.ExitCode, ex.Message, ex.Code);
             }
-        }, null, interval, Timeout.InfiniteTimeSpan);
+        }, null, WatchdogInterval(), Timeout.InfiniteTimeSpan);
+    }
+
+    /// <summary>
+    /// 下一轮复查间隔。
+    ///
+    /// WatchdogIntervalSeconds &gt; 0 时是固定间隔：历史实现会在首次成功后改用后端心跳
+    /// （上限 900 秒），导致配 15 秒实际 15 分钟才复查一次，配置的语义失效。
+    /// </summary>
+    private TimeSpan WatchdogInterval()
+    {
+        var fixedSec = _o.WatchdogIntervalSeconds;
+        if (fixedSec > 0) return TimeSpan.FromSeconds(Math.Max(15, fixedSec));
+
+        var hb = _state.TryGetValue("heartbeat_sec", out var h) ? h.GetInt32() : 0;
+        if (hb <= 0) hb = _o.HeartbeatSeconds;
+        if (hb <= 0) hb = 21600;
+        var cap = _o.HeartbeatCapSeconds;
+        var sec = cap > 0 ? Math.Min(hb, cap) : hb;
+        return TimeSpan.FromSeconds(Math.Clamp(sec, 15, int.MaxValue / 1000));
     }
 
     public void StopWatchdog()
@@ -387,6 +418,7 @@ public sealed class LicenseGuard
             app_id = _o.AppId,
             key = rawKey,
             machine_id = _machineId,
+            machine_id_alt = _machineIdLegacy,
         }).ConfigureAwait(false);
         if (resp is not null && resp.Value.TryGetProperty("ok", out var ok) && ok.GetBoolean())
         {
@@ -550,14 +582,103 @@ internal static class Token
 internal static class MachineFingerprint
 {
     private static string? _cached;
+    private static string? _cachedLegacy;
 
+    /// <summary>当前指纹（v2）。只包含跨重启、跨系统升级都稳定不变的因子。</summary>
     public static string Compute()
     {
         if (_cached is not null) return _cached;
+        _cached = Hash(V2Tokens());
+        return _cached;
+    }
 
+    /// <summary>
+    /// 旧版指纹（v1），仅供向服务端上报 machine_id_alt 使用。
+    /// v1 把机器名和 OS 版本也拼进了哈希，改电脑名或升级 Windows 就会漂移，
+    /// 老用户升级 SDK 后靠它认领原来的激活记录，不会被当成新设备占掉名额。
+    /// </summary>
+    public static string ComputeLegacy()
+    {
+        if (_cachedLegacy is not null) return _cachedLegacy;
+        _cachedLegacy = Hash(V1Tokens());
+        return _cachedLegacy;
+    }
+
+    private static string Hash(string raw)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        return Convert.ToHexString(hash).ToLowerInvariant()[..32];
+    }
+
+    // ── v2：只保留硬件级、不受软件配置影响的因子 ────────────────────
+    internal static string V2Tokens()
+    {
         var sb = new StringBuilder();
+        var stable = false;   // 是否至少拿到了一个硬件级标识
 
-        // 首选注册表 MachineGuid —— 重装系统前保持不变
+        if (OperatingSystem.IsWindows())
+        {
+            // 主板 / BIOS
+            try
+            {
+                using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"HARDWARE\DESCRIPTION\System\BIOS", false);
+                if (key?.GetValue("SystemProductName") is string p && p.Length > 0)
+                { sb.Append("prod:").Append(p.Trim()).Append('|'); stable = true; }
+                if (key?.GetValue("BaseBoardProduct") is string b && b.Length > 0)
+                { sb.Append("board:").Append(b.Trim()).Append('|'); stable = true; }
+            }
+            catch { /* 权限不足或键不存在 */ }
+
+            // CPU：Identifier 形如 "Intel64 Family 6 Model 154 Stepping 3"，
+            // 现代 CPU 没有全局唯一序列号，这个只作为弱因子，降低整机克隆的通用性
+            try
+            {
+                using var cpu = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"HARDWARE\DESCRIPTION\System\CentralProcessor\0", false);
+                if (cpu?.GetValue("Identifier") is string id && id.Length > 0)
+                    sb.Append("cpu:").Append(id.Trim()).Append('|');
+                if (cpu?.GetValue("ProcessorNameString") is string nm && nm.Length > 0)
+                    sb.Append("cpuname:").Append(nm.Trim()).Append('|');
+            }
+            catch { /* ignore */ }
+
+            // 系统盘卷序列号（重灌系统会变，但那是换了系统，理应重新激活）
+            var vol = SystemVolumeSerial();
+            if (vol is not null) { sb.Append("vol:").Append(vol).Append('|'); stable = true; }
+
+            // MachineGuid：重装系统才变，是最贴近"这台机器"的标识。
+            // 放在最后但仍参与哈希——它可改，所以不能是唯一因子。
+            try
+            {
+                using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Cryptography", false);
+                if (key?.GetValue("MachineGuid") is string guid && guid.Length > 0)
+                { sb.Append("guid:").Append(guid.Trim().ToLowerInvariant()).Append('|'); stable = true; }
+            }
+            catch { /* 非 Windows 或权限不足 */ }
+        }
+        else
+        {
+            var id = UnixMachineId();
+            if (id is not null) { sb.Append("id:").Append(id).Append('|'); stable = true; }
+        }
+
+        // 硬件因子一个都没取到（容器 / 权限受限）时才用 MAC 兜底，
+        // 避免正常情况下换网卡、开随机 MAC 就导致指纹漂移。
+        if (!stable)
+        {
+            var mac = FirstPhysicalMac();
+            if (mac is not null) sb.Append("mac:").Append(mac);
+        }
+
+        return sb.ToString();
+    }
+
+    // ── v1：历史算法，一字不改地保留，仅用于迁移 ────────────────────
+    internal static string V1Tokens()
+    {
+        var sb = new StringBuilder();
         try
         {
             using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
@@ -567,7 +688,6 @@ internal static class MachineFingerprint
         }
         catch { /* 非 Windows 或权限不足 */ }
 
-        // 主板 / 系统盘序列号作为补充
         try
         {
             using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
@@ -579,10 +699,90 @@ internal static class MachineFingerprint
 
         sb.Append("host:").Append(Environment.MachineName).Append('|');
         sb.Append("os:").Append(Environment.OSVersion.VersionString);
+        return sb.ToString();
+    }
 
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
-        _cached = Convert.ToHexString(hash).ToLowerInvariant()[..32];
-        return _cached;
+    private static string? UnixMachineId()
+    {
+        foreach (var path in new[] { "/etc/machine-id", "/var/lib/dbus/machine-id", "/sys/class/dmi/id/product_uuid" })
+        {
+            try
+            {
+                var v = File.ReadAllText(path).Trim();
+                if (v.Length > 0) return v;
+            }
+            catch { /* 不存在或无权限，换下一个 */ }
+        }
+
+        // macOS：hw.uuid 等价于 IOPlatformUUID
+        try
+        {
+            var psi = new ProcessStartInfo("sysctl", "-n hw.uuid")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var p = Process.Start(psi);
+            if (p is not null)
+            {
+                var outp = p.StandardOutput.ReadToEnd().Trim();
+                if (!p.WaitForExit(3000)) p.Kill(entireProcessTree: true);
+                if (outp.Length > 0) return outp;
+            }
+        }
+        catch { /* ignore */ }
+
+        return null;
+    }
+
+    private static string? FirstPhysicalMac()
+    {
+        try
+        {
+            // 排除随机本地管理地址（第 2 位十六进制为 2/6/A/E）与常见虚拟网卡网段
+            string[] virtualPrefix = { "00155D", "005056", "080027", "525400", "001C42", "0A0027" };
+            foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                var mac = ni.GetPhysicalAddress().GetAddressBytes();
+                if (mac.Length != 6) continue;
+                // 第二个字节的 bit1 = 1 表示本地管理地址（随机 MAC），会漂移，不能用
+                if ((mac[1] & 0x02) != 0) continue;
+                var hex = Convert.ToHexString(mac).ToUpperInvariant();
+                if (virtualPrefix.Any(p => hex.StartsWith(p, StringComparison.Ordinal))) continue;
+                return hex.ToLowerInvariant();
+            }
+        }
+        catch { /* ignore */ }
+        return null;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetVolumeInformationW", CharSet = CharSet.Unicode, SetLastError = false)]
+    private static extern int GetVolumeInformation(
+        string lpRootPathName,
+        StringBuilder? lpVolumeNameBuffer,
+        int nVolumeNameSize,
+        out uint lpVolumeSerialNumber,
+        out uint lpMaximumComponentLength,
+        out uint lpFileSystemFlags,
+        StringBuilder? lpFileSystemNameBuffer,
+        int nFileSystemNameSize);
+
+    private static string? SystemVolumeSerial()
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try
+        {
+            // 系统盘根目录，如 "C:\"
+            var root = Path.GetPathRoot(Environment.SystemDirectory ?? "C:\\") ?? "C:\\";
+            var ok = GetVolumeInformation(root, null, 0, out var serial, out _, out _, null, 0);
+            if (ok != 0 && serial != 0) return serial.ToString("X8");
+        }
+        catch { /* 非 Windows / 调用失败 */ }
+        return null;
     }
 }
 

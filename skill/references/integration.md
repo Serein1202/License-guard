@@ -21,6 +21,19 @@ SDK 源码位于本 Skill 的 `assets/clients/`：
 
 ---
 
+## 通用：设备指纹 v2 与老用户迁移
+
+v2 指纹只采集**硬件级**因子，移除了主机名、OS 版本、CPU 架构这三个会随用户操作变化的字段。
+原 v1 算法把它们拼进哈希，结果是：**用户改一次电脑名，或升级一次 Windows，指纹就变了**，
+服务端把它当成新设备，单机授权直接卡在 `DEVICE_LIMIT`。
+
+三端 SDK 升级后会自动随请求带上 `machine_id_alt`（旧算法算出的指纹），
+服务端命中旧激活记录时就地改写为新指纹（`db.ts::resolveMachineId`），**用户无感，不会掉激活**。
+
+对调用方的要求：无。升级 SDK 即可。
+
+---
+
 ## 通用：三行接入
 
 ```python
@@ -84,7 +97,7 @@ if __name__ == "__main__":
 | `request_timeout` | `8` | 单次请求超时（秒） |
 | `retry_times` | `2` | 网络失败重试次数 |
 | `heartbeat_sec` | `21600` | 心跳间隔默认值（服务端策略会覆盖） |
-| `watchdog_interval_sec` | `120` | 看门狗检查间隔——**到期后最多这么久就会退出** |
+| `watchdog_interval_sec` | `120` | 看门狗检查间隔——**到期后最多这么久就会退出**。`>0` = 固定间隔，每轮都用它，不被后端 `heartbeat_sec` 覆盖；`0` = 跟随后端心跳。下限 15 秒 |
 | `storage_dir` | 系统数据目录 | 本地状态文件位置 |
 | `on_denied` | `None` | `(code, message) -> None`。设了它就**不会**自动退出，由你自己处理 |
 | `debug` | `False` | 打印调试日志到 stderr |
@@ -223,16 +236,17 @@ try {
 
 ```javascript
 import { createHash } from "node:crypto";
-import { hostname, platform, arch } from "node:os";
+import { platform, arch } from "node:os";
 
 export function simpleMachineId() {
   return createHash("sha256")
-    .update(`${hostname()}|${platform()}|${arch()}`)
+    .update(`${platform()}|${arch()}`)
     .digest("hex").slice(0, 32);
 }
 ```
 
-> 注意：这种方式指纹较弱，换主机名就能绕过。仅在无法读注册表时作为降级方案。
+> 注意：内置 v2 指纹已不再使用主机名；上面的降级方案连注册表都读不了，指纹强度明显低于内置实现，
+> 同配置机器会得到同一个 ID。仅在完全无法执行外部命令时使用。
 
 ### Tauri / Rust
 
@@ -277,6 +291,16 @@ guard.StartWatchdog();
 Console.WriteLine($"剩余天数: {guard.DaysLeft()}");
 if (guard.HasFeature("pro")) { /* ... */ }
 ```
+
+### 所有配置项（.NET）
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `WatchdogIntervalSeconds` | `120` | `>0` = 固定复查间隔，每轮都用它，不被后端心跳覆盖；`0` = 跟随后端 `heartbeat_sec`。下限 15 秒 |
+| `HeartbeatCapSeconds` | `900` | 仅在上者为 `0` 时生效：本地复查间隔上限 |
+| `HeartbeatSeconds` | `21600` | 心跳间隔默认值（服务端策略会覆盖） |
+| `MachineId` | 只读 | 本机 v2 指纹 |
+| `MachineIdLegacy` | 只读 | 本机 v1 指纹，SDK 自动上报给服务端做激活迁移 |
 
 ### WPF / WinForms 接入
 
@@ -350,7 +374,13 @@ guard.authorize()
 guard.start_watchdog()     # 到期那一刻，即使程序正在跑也会退出
 ```
 
-`watchdog_interval_sec` 决定「到期后最多多久才退出」。传 `0` 表示**跟随后端下发的 `heartbeat_sec`**（推荐：后端是唯一权威）。想让到期立刻生效就在后台把「心跳间隔」调小。
+`watchdog_interval_sec` 决定「到期后最多多久才退出」，默认 120 秒。
+
+- **传 `>0`（推荐）**：固定间隔，每一轮都按这个值复查，不会被后端下发的 `heartbeat_sec` 覆盖。要"到期即退"就传 15。
+- **传 `0`**：跟随后端 `heartbeat_sec`（后端是唯一权威），可用 `heartbeat_cap_sec` 在本地夹上限。
+
+> 历史版本缺陷：传 15 秒时，Python 端首次成功后会改用后端 `heartbeat_sec`（默认 6 小时），
+> Node 端会改用 `min(heartbeat_sec, 900)`，配置不生效。v2 已修正为「显式配置即固定间隔」。
 
 ### 让客户端完全跟随后端策略
 

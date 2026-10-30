@@ -27,7 +27,8 @@ Worker 源码位置（上游仓库）：`worker/src/routes/public.ts`、`worker/
 {
   "app_id":       "mytool",              // 必填，与后台建产品时的 app_id 一致
   "key":          "ABCD-EFGH-JKMN-PQRS", // 必填，也可写 license_key
-  "machine_id":   "268a8b14ea6f99dc...", // 必填，本机硬件指纹
+  "machine_id":   "268a8b14ea6f99dc...", // 必填，本机硬件指纹（v2 算法）
+  "machine_id_alt":"3e28fa7aa9bacb6f...",// 可选，v1 旧算法指纹——用于迁移升级前的激活记录
   "machine_name": "xhdong-02805",        // 可选，仅用于后台展示
   "app_version":  "1.0.0",               // 可选
   "platform":     "windows"              // 可选（windows/macos/linux）
@@ -35,6 +36,10 @@ Worker 源码位置（上游仓库）：`worker/src/routes/public.ts`、`worker/
 ```
 
 参数也可放在 query string 上（`?app_id=&key=`），但 `machine_id` 只从 body 读。
+
+`machine_id_alt` 的用途：v2 指纹移除了主机名/OS 版本等可变因子，升级 SDK 后 `machine_id` 会变。
+服务端先查新指纹，查不到再查 `machine_id_alt`；命中旧记录时就地把 `machine_id` 改成新值，用户不掉激活。
+不带该字段的旧 SDK 不受影响。
 
 ### 成功响应（activate / verify / heartbeat）
 
