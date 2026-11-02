@@ -31,7 +31,11 @@
     "db:remote": "wrangler d1 execute DB --remote --file=./schema.sql --yes",
     "keys": "node scripts/gen-keys.mjs",
     "typecheck": "tsc --noEmit",
-    "test:activation": "python tests/test_activation_atomic.py"
+    "test:activation": "python tests/test_activation_atomic.py",
+    "test:e2e": "python tests/e2e_upgrade.py",
+    "test:concurrency": "python tests/test_concurrency.py",
+    "test:timesync": "python tests/e2e_timesync.py",
+    "test:migration": "python tests/test_schema_migration.py"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.0.0",

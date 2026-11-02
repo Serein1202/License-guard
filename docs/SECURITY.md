@@ -107,6 +107,15 @@ def _effective_now(self, state):
 - 检测到回拨 → `CLOCK_TAMPERED` → 按 `fail_mode` 处理
 - `strict_clock=False` 可以关掉（不推荐，除非你的用户环境时钟很不准）
 
+在此基础上，三端 SDK 还会通过 `/v1/time`（或校验响应自带的 `server_time`）拿服务端权威时间，
+把本机时钟偏差 `clock_skew` 存进本地状态，之后所有到期判定都用 `挂钟 + skew`：
+
+- `clock_skew` 每次联网都重测，长时间离线也不会过期
+- 校正后的时间与 `last_online` 比对：把系统时间往回调、且本地已有 skew 时，即使 `last_wall` 被同步改掉也会被第二条口径检出
+- `/v1/time` 返回的 `server_time` 带 Ed25519/ES256 签名（typ=TS），中间人改不了明文；
+  SDK 会比对签名里的 `t` 与明文 `server_time`，不一致直接 `BAD_TOKEN`
+- 需要在启动时校一次准的话，可手动调用：Python `guard.sync_time()` / Node `await guard.syncTime()` / C# `await guard.SyncTimeAsync()`，离线时抛 `NETWORK`，正常校验路径不依赖它
+
 **局限**：用户如果在**第一次运行之前**就把时间调好，然后一直不联网……这时还没有 `last_wall` 锚点，防不住。但第一次激活必须联网，服务端会下发 `srv`（服务端时间），所以这个窗口是关闭的。
 
 ### 3.2 防本地文件篡改
@@ -137,8 +146,13 @@ v1 算法曾把**主机名**、**OS 版本**、**CPU 架构**也拼进哈希。�
 正版用户会因此被判成"新设备"、白占一个设备位，单机授权直接卡在 `DEVICE_LIMIT`。v2 已移除这些可变因子。
 
 > **升级提示**：v2 指纹与 v1 不同，老客户端升级 SDK 后 `machine_id` 会变。
-> 三端 SDK 会同时上报旧指纹（字段名 `machine_id_alt`），服务端命中旧激活记录时就地把 `machine_id` 改成新值
-> （`db.ts::resolveMachineId`），用户无感，不会掉激活。**旧版 SDK 不含该字段，服务端与新版 SDK 均可正常处理。**
+> 三端 SDK 会同时上报旧指纹（字段名 `machine_id_alt`），服务端命中旧激活记录时就地把 `machine_id` 改成新值，
+> 同时把旧值留在 `activations.machine_id_alt`（`db.ts::resolveMachineId`），用户无感，不会掉激活。
+>
+> 保留 `machine_id_alt` 是为了**反向兼容**：用户把软件降级回旧 SDK 时，旧 SDK 只上报 v1 指纹，
+> 这时服务端靠 alt 认回同一条记录——令牌 `mid` 回退成 v1（老 SDK 才能通过自校验），
+> 但设备记录的主键仍是 v2，不新增设备位。没有这一步的话，降级用户的每一次校验都会是 `DEVICE_NOT_ACTIVATED`。
+> **旧版 SDK 不含该字段，服务端与新版 SDK 均可正常处理。**
 
 服务端记录每台设备的激活，超出 `max_devices` 直接拒绝。计数与写入在**同一条 SQL** 内完成
 （`db.ts::upsertActivation`），两台设备同时首次激活不会同时通过检查——拆成"先查数量再写入"两步会留下并发窗口，
@@ -150,29 +164,35 @@ v1 算法曾把**主机名**、**OS 版本**、**CPU 架构**也拼进哈希。�
 
 ### 3.4 防长期离线白嫖
 
-令牌本身有 `exp`（默认 24 小时），到期需要重新联网。同时本地记录 `last_online`，断网超过 `offline_grace_days` 就失效。
+三个旋钮，**分管两件事，不要相加**。
 
-两个旋钮的配合：
+服务端两个：
 
-| 参数 | 默认 | 作用 | 调小的代价 |
-|---|---|---|---|
-| `token_ttl_sec` | 86400 | 令牌多久必须刷新 | 请求变多（免费额度 10 万/天，够用） |
-| `offline_grace_days` | 7 | 断网多久后失效 | 出差/无网环境用户会投诉 |
+| 参数 | 默认 | 管什么 |
+|---|---|---|
+| `token_ttl_sec` | 86400 | 令牌 `exp` 的上限。只有在客户端开了缓存复用（`online_check_interval_sec > 0`）时才限制「缓存能用到多久」；客户端每次都联网时它不参与判定 |
+| `offline_grace_days` | 7 | 连不上服务器时的兜底生存期。`last_online + grace` 之后一律拒绝 |
 
-**想快速吊销就调小 `token_ttl_sec`。** 想在管理后台封禁后 1 小时内生效，就设成 3600。
+客户端一个：
 
-**后台封禁不是绝对即时生效的**，这是一处有意的设计取舍：
-客户端手里只要还握着一份未过期的缓存令牌，就能先在本地通过检查；连不上服务器时还能按离线策略继续用。
-允许短期断网，就不可能同时保证任何后台操作都立刻传达到客户端。
+| 配置项 | Python | Node | C# | 默认 |
+|---|---|---|---|---|
+| 缓存免联网时长（秒） | `online_check_interval_sec` | `onlineCheckIntervalSec` | `OnlineCheckIntervalSeconds` | **0 = 每次校验都联网** |
 
-最坏生效延迟可以估算：
+**生效延迟分两种场景，算法不同：**
 
-```
-后台操作生效所需时间 ≈ token_ttl_sec + offline_grace_days × 86400
-```
+| 场景 | 最坏生效延迟 |
+|---|---|
+| 客户端能联网 | `max(online_check_interval_sec, watchdog_interval_sec) + 一次请求超时`；默认 ≈ 看门狗周期 **120 秒** |
+| 客户端断网 | `offline_grace_days` 到期才拒绝；这期间后台操作传不到，只能等它回连 |
 
-默认值下为 24 小时 + 7 天。想压缩到 1 小时内：`token_ttl_sec=3600`、`offline_grace_days=0`。
-代价是联网更频繁，且断网时更容易直接起不来——按你的用户场景权衡。
+**后台封禁不是绝对即时生效的**，这是一处有意的设计取舍：允许短期断网，就不可能同时保证任何后台操作立刻传达到客户端。
+
+想压缩断网窗口：`offline_grace_days=0`（代价是无网环境完全起不来）。
+想压缩在线窗口：把客户端 `online_check_interval_sec` 保持 `0`，并把 `watchdog_interval_sec` 调小（下限 15 秒）。
+
+> **常见误解**：把 `token_ttl_sec` 调小并不能加快封禁。客户端每次都联网时，每次请求都会刷新令牌，`exp` 从来不是瓶颈。它影响的是「客户端设了缓存复用后，旧令牌还能用多久」。
+> 历史文档里写的 `token_ttl_sec + offline_grace_days×86400` 是把两个场景的旋钮相加，口径错误，已更正。
 
 ### 3.5 到期后立即停止运行
 
@@ -239,11 +259,13 @@ ALTER TABLE licenses DROP COLUMN key_display;
 
 **2. 缩短令牌 TTL**
 
-默认 24 小时意味着封禁后最长 24 小时才生效。生产环境建议 1~4 小时：
+`token_ttl_sec` 限制的是「客户端开启缓存复用后旧令牌还能用多久」，默认 24 小时。客户端默认每次联网（`online_check_interval_sec=0`），此时它不参与封禁延迟。生产环境建议 1~4 小时：
 
 ```bash
 curl -X PATCH .../admin/api/products/prod_xxx -d '{"token_ttl_sec": 3600}'
 ```
+
+想真正压缩封禁延迟，改的是客户端 `watchdog_interval_sec`（见 3.4）。
 
 **3. 定期轮换签名密钥**
 
@@ -305,8 +327,8 @@ wrangler d1 export license-guard --remote --output=backup-$(date +%F).sql
 - [ ] 公开仓库里的 `wrangler.toml` 不含真实资源 ID（默认只写绑定名，由 Cloudflare 自动创建；如需手动指定，用 `git update-index --skip-worktree worker/wrangler.toml` 避免 ID 进仓库）
 - [ ] 公开仓库的 Git 历史里没有 `keys.json`、`.dev.vars` 等含密钥的文件（`git log --all --diff-filter=A --name-only`）
 - [ ] 客户端内嵌的公钥和 Worker 私钥是同一对（用一次真实激活验证）
-- [ ] `token_ttl_sec` 按你的封禁时效要求设置过
-- [ ] `offline_grace_days` 按用户网络环境设置过
+- [ ] `token_ttl_sec` 按「客户端开缓存复用后旧令牌还能用多久」设置过（默认 86400）
+- [ ] `offline_grace_days` 按用户网络环境设置过（决定断网生存期）
 - [ ] `fail_mode` 选的是你要的（`hard` 闪退 / `message` 提示）
 - [ ] D1 备份任务已配置
 

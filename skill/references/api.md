@@ -14,8 +14,8 @@ Worker 源码位置（上游仓库）：`worker/src/routes/public.ts`、`worker/
 | `GET` | `/health` | 存活检查 | 无 |
 | `GET` | `/v1/time?app_id=` | 服务端签名时间（抗改系统时间） | 无 |
 | `GET` | `/v1/meta?app_id=` | 产品策略与算法（可用来校验 app_id 是否有效） | 无 |
-| `POST` | `/v1/activate` | 首次激活，**占用一个设备位** | 30 次/分/IP |
-| `POST` | `/v1/verify` | 校验 / 续令牌，**不占设备位** | 120 次/分/IP |
+| `POST` | `/v1/activate` | 首次激活，**占用一个设备位** | 30 次/分/IP（`RATE_LIMIT_ACTIVATE` 可调） |
+| `POST` | `/v1/verify` | 校验 / 续令牌，**不占设备位** | 120 次/分/IP（`RATE_LIMIT_VERIFY` 可调） |
 | `POST` | `/v1/heartbeat` | 与 `/v1/verify` 完全等价（仅便于区分日志） | 120 次/分/IP |
 | `POST` | `/v1/deactivate` | 解绑本机 | 无 |
 
@@ -38,7 +38,11 @@ Worker 源码位置（上游仓库）：`worker/src/routes/public.ts`、`worker/
 参数也可放在 query string 上（`?app_id=&key=`），但 `machine_id` 只从 body 读。
 
 `machine_id_alt` 的用途：v2 指纹移除了主机名/OS 版本等可变因子，升级 SDK 后 `machine_id` 会变。
-服务端先查新指纹，查不到再查 `machine_id_alt`；命中旧记录时就地把 `machine_id` 改成新值，用户不掉激活。
+服务端先查新指纹，查不到再查 `machine_id_alt`；命中旧记录时就地把 `machine_id` 改成新值，
+同时把旧值留在 `activations.machine_id_alt`，用户不掉激活、不多占设备位。
+
+留存的旧值用于**反向兼容**：用户把软件降级回旧 SDK 时只上报 v1 指纹，服务端靠 alt 认回同一条记录，
+令牌 `mid` 回退成 v1（老 SDK 才能通过自校验），设备记录主键保持 v2 不变。
 不带该字段的旧 SDK 不受影响。
 
 ### 成功响应（activate / verify / heartbeat）
@@ -135,7 +139,7 @@ HTTP `403`（参数错误为 `400`、限流为 `429`、未知应用/授权码为
 { "server_time": 1791525699, "sign_alg": "ed25519", "token": "eyJ..." }
 ```
 
-`token` 是签名的服务端时间，客户端用它判断本机时钟有没有被回拨。
+`token` 是签名的服务端时间（typ=TS，payload `{"v":1,"t":<ts>}`），客户端用它算本机时钟偏差。三端 SDK 的 `sync_time()` / `syncTime()` / `SyncTimeAsync()` 会调它并把偏差存进本地状态，之后到期判定都用 `挂钟 + skew`。
 
 #### `POST /v1/deactivate`
 

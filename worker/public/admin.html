@@ -2,8 +2,10 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="robots" content="noindex,nofollow" />
+<meta name="theme-color" content="#ffffff" />
+<meta name="color-scheme" content="light" />
 <title>License Guard · 授权管理</title>
 <style>
   :root {
@@ -31,6 +33,8 @@
     color: var(--text);
     font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;   /* iOS 横屏时不要自动放大字号 */
+    text-size-adjust: 100%;
   }
   a { color: var(--brand); }
 
@@ -38,10 +42,11 @@
   #login {
     position: fixed; inset: 0; z-index: 100;
     display: flex; align-items: center; justify-content: center;
+    padding: 20px;
     background: var(--bg);
   }
   #login .card {
-    width: 380px; background: var(--panel); border: 1px solid var(--border);
+    width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--border);
     border-radius: 14px; padding: 28px; box-shadow: 0 12px 32px rgba(16,24,40,.08);
   }
   #login h1 { margin: 0 0 4px; font-size: 19px; }
@@ -101,6 +106,7 @@
   label.field > input, label.field > select, label.field > textarea { width: 100%; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .hint { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .search-input { width: 240px; }
 
   button {
     font: inherit; cursor: pointer; border-radius: 8px;
@@ -160,8 +166,160 @@
 
   code.inline { font-family: var(--mono); background: #f1f3f5; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
   .keybox { font-family: var(--mono); font-size: 14px; background: var(--brand-soft); border: 1px dashed #b9cdfb; color: #1e40af; padding: 12px; border-radius: 8px; word-break: break-all; line-height: 1.9; }
+
+  /* ---------- 授权码复制 ---------- */
+  .keylist { display: flex; flex-direction: column; gap: 8px; }
+  .keyrow {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--brand-soft); border: 1px dashed #b9cdfb;
+    border-radius: 8px; padding: 8px 8px 8px 11px;
+  }
+  .keyrow code {
+    flex: 1; min-width: 0;
+    font-family: var(--mono); font-size: 13.5px; color: #1e40af;
+    word-break: break-all; letter-spacing: .01em;
+  }
+  .keyrow > button { flex: 0 0 auto; background: #fff; }
+  .copy-hint { font-size: 12px; color: var(--text-dim); margin-top: 10px; }
+  /* 复制成功后的短暂反馈态 */
+  button.done { color: var(--ok); border-color: #b7e4c7; background: var(--ok-soft); }
   .muted { color: var(--text-dim); }
   .nowrap { white-space: nowrap; }
+
+  /* 表格容器：超宽时横向滚动，不做内容挤压 */
+  #licTableWrap, #prodTableWrap, #auditTableWrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* 行内操作按钮组：桌面横排不换行，窄屏（见下方媒体查询）转 flex 自动换行 */
+  .acts { white-space: nowrap; }
+  .acts > button { margin-right: 6px; }
+
+  /* 分页条：授权码可能上千条，必须能翻页，不能只拉前 N 条 */
+  .pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .pager .info { color: var(--text-dim); font-size: 13px; }
+  .pager .spacer { flex: 1 1 auto; }
+  .pager button { min-height: 34px; padding: 0 14px; }
+  .pager button[disabled] { opacity: .45; cursor: not-allowed; }
+  .acts > button:last-child { margin-right: 0; }
+
+  /* 审计详情：桌面单行截断，窄屏展开 */
+  td.detail { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ============================================================
+     移动端适配
+     ≤760px：表格转卡片、工具栏单列、模态改底部抽屉
+     pointer:coarse：放大触控目标到 40px 以上
+     ============================================================ */
+  @media (max-width: 760px) {
+
+    /* ---- 顶栏：隐藏服务端时间，收回两侧留白 ---- */
+    header.top { height: 52px; padding: 0 12px; gap: 8px; }
+    header.top .logo { font-size: 14px; }
+    header.top .who { display: none; }          /* 375px 放不下，进「概览」看更合适 */
+    header.top .badge { font-size: 11px; }
+
+    main { padding: 12px 10px calc(24px + env(safe-area-inset-bottom)); }
+
+    /* ---- 概览卡：3 列紧凑排布，一屏内看完 ---- */
+    .stats {
+      grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+      gap: 8px; margin-bottom: 14px;
+    }
+    .stat { padding: 10px 11px; border-radius: 9px; }
+    .stat .k { font-size: 11px; line-height: 1.35; }
+    .stat .v { font-size: 18px; margin-top: 2px; }
+
+    /* ---- Tab：三等分，整块可点 ---- */
+    .tabs { margin-bottom: 12px; }
+    .tabs button { flex: 1; padding: 10px 0; text-align: center; }
+
+    /* ---- 工具栏：全部单列，去掉 fixed width ---- */
+    .toolbar { padding: 10px 12px; gap: 8px; }
+    .toolbar > select,
+    .toolbar > input { flex: 1 1 100%; width: 100%; }
+    .toolbar > .spacer { display: none; }
+    .toolbar > button { flex: 1 1 100%; }
+
+    /* ---- 表单控件：16px 防 iOS 聚焦自动缩放 ---- */
+    input, select, textarea { font-size: 16px; padding: 9px 11px; }
+    input[type="datetime-local"] { min-width: 0; }
+    .row2 { grid-template-columns: 1fr; gap: 0; }
+
+    /* ---- 表格 → 卡片（每行展开为「标签: 值」） ---- */
+    thead { display: none; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    tr { border-bottom: 1px solid var(--border); padding: 6px 0; }
+    tr:last-child { border-bottom: 0; }
+    tbody tr:hover { background: transparent; }
+
+    td { border: 0; padding: 5px 13px; text-align: left; }
+    td::before {
+      content: attr(data-label);
+      display: block;
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-bottom: 1px;
+      letter-spacing: .02em;
+    }
+    td:not([data-label])::before { display: none; }
+
+    /* 首列当卡片标题，不再重复显示标签 */
+    td.cell-title { padding: 6px 13px 4px; font-size: 14px; font-weight: 600; }
+    td.cell-title.key { font-size: 12.5px; font-weight: 500; }
+
+    td.key { font-size: 12.5px; word-break: break-all; }
+    td.cell-wrap { word-break: break-word; overflow-wrap: anywhere; }
+    td.detail {
+      max-width: none; white-space: normal;
+      word-break: break-word; overflow-wrap: anywhere;
+      font-family: var(--mono); font-size: 12px; line-height: 1.5;
+    }
+    .acts { display: flex; flex-wrap: wrap; gap: 6px; white-space: normal; margin-top: 3px; }
+    .acts > button { margin-right: 0; }
+
+    /* ---- 登录：小屏不撑破 ---- */
+    #login { padding: 20px 16px; }
+    #login .card { padding: 24px 20px; }
+
+    /* ---- 模态 → 底部抽屉 ---- */
+    .overlay { padding: 0; align-items: flex-end; overscroll-behavior: contain; }
+    .modal {
+      width: 100%; max-width: 100%;
+      border-radius: 16px 16px 0 0;
+      max-height: 92vh;
+      max-height: 92dvh;              /* 键盘弹出时跟随可视视口收缩 */
+      display: flex; flex-direction: column;
+      overflow: hidden;               /* 滚动交给 .body，避免双滚动条 */
+      overscroll-behavior: contain;
+    }
+    .modal h3 { padding: 14px 16px; flex: 0 0 auto; }
+    .modal .body { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 16px 16px 20px; }
+    .modal .foot {
+      flex: 0 0 auto;
+      padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    }
+    .modal .foot button { flex: 1; padding: 11px; }
+
+    /* ---- 提示条：贴满宽度，避开 home indicator ---- */
+    #toast { left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); }
+    .toast { max-width: none; }
+
+    /* ---- 分页条：375px 下四个按钮 + 一行统计，统计独占一行 ---- */
+    .pager { gap: 8px; margin-top: 12px; }
+    .pager .info { flex: 1 1 100%; text-align: center; order: -1; font-size: 12.5px; }
+    .pager .spacer { display: none; }
+    .pager button { flex: 1 1 0; min-width: 0; min-height: 40px; padding: 0 6px; font-size: 12.5px; }
+  }
+
+  /* 触屏设备统一放大点击热区（不区分断点，iPad 也生效） */
+  @media (pointer: coarse) {
+    button { min-height: 40px; padding: 9px 14px; }
+    button.tiny { min-height: 34px; padding: 7px 11px; font-size: 12.5px; }
+    button.ghost { min-height: 34px; }
+    .tabs button { min-height: 44px; }
+    input, select { min-height: 40px; }
+  }
 </style>
 </head>
 <body>
@@ -211,12 +369,13 @@
             <option value="suspended">暂停</option>
             <option value="revoked">吊销</option>
           </select>
-          <input id="fQuery" placeholder="搜索授权码 / 客户 / 备注" style="width:240px" />
+          <input id="fQuery" class="search-input" placeholder="搜索授权码 / 客户 / 备注" />
           <button id="searchBtn">查询</button>
           <div class="spacer" style="flex:1"></div>
           <button class="primary" id="newLicBtn">+ 生成授权码</button>
         </div>
         <div id="licTableWrap"></div>
+        <div id="licPager" class="pager"></div>
       </div>
     </section>
 
@@ -268,12 +427,91 @@
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+  /* 用于把多行文本塞进 data-* 属性：换行转实体，避免被解析器折叠 */
+  function attr(s) { return esc(s).replace(/\r\n?/g, "&#10;"); }
   function toast(msg, kind) {
     var t = el("div", { class: "toast" + (kind ? " " + kind : "") }, esc(msg));
     $("#toast").appendChild(t);
     setTimeout(function () { t.remove(); }, kind === "err" ? 5200 : 3000);
   }
   function token() { return localStorage.getItem("lg_admin_token") || ""; }
+
+  /* ---------------------------- 剪贴板 ---------------------------- */
+
+  /* 老 API 兜底：非 HTTPS / 非 localhost 下 navigator.clipboard 不存在，
+     部分安卓 WebView 也存在但不生效，因此保留 execCommand('copy') 通路。 */
+  function legacyCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    /* 定位到视口内 1px 处并透明，避免 iOS 聚焦时弹键盘、页面跳动 */
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;outline:0;opacity:0;";
+    document.body.appendChild(ta);
+
+    var sel = document.getSelection();
+    var prev = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+    var ok = false;
+    try {
+      ta.select();
+      ta.setSelectionRange(0, text.length);   /* iOS 必须显式设范围 */
+      ok = document.execCommand("copy");
+    } catch (e) {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+    if (prev && sel) { sel.removeAllRanges(); sel.addRange(prev); }   /* 还原用户原有选区 */
+    return ok;
+  }
+
+  /* 返回 Promise<boolean>。必须在 click 事件同步栈内调用（Safari 用户手势要求）。 */
+  function copyText(text) {
+    text = String(text === null || text === undefined ? "" : text);
+    if (!text) return Promise.resolve(false);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        return navigator.clipboard.writeText(text)
+          .then(function () { return true; })
+          .catch(function () { return legacyCopy(text); });
+      } catch (e) { /* 同步抛错（无安全上下文）直接走兜底 */ }
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+
+  /* 复制 + 提示 + 按钮短暂反馈。失败时退到「手动复制」弹窗而不是只报个错。 */
+  function copyAndToast(text, btn, okMsg) {
+    return copyText(text).then(function (ok) {
+      if (!ok) {
+        toast("自动复制被浏览器拒绝，已打开手动复制", "err");
+        manualCopy(text);
+        return false;
+      }
+      toast(okMsg || "已复制到剪贴板", "ok");
+      if (btn && btn.classList) {
+        var old = btn.textContent;
+        btn.textContent = "已复制";
+        btn.classList.add("done");
+        btn.disabled = true;
+        setTimeout(function () {
+          btn.textContent = old;
+          btn.classList.remove("done");
+          btn.disabled = false;
+        }, 1200);
+      }
+      return true;
+    });
+  }
+
+  /* 最后兜底：文本预选中，用户按 Ctrl/⌘+C 或长按「拷贝」即可。
+     常见于内网 http 部署（无 Clipboard API）与部分安卓 WebView。 */
+  function manualCopy(text) {
+    openModal("手动复制",
+      '<p class="muted" style="margin-top:0">浏览器拒绝了自动写入剪贴板。文本已选中，按 <b>Ctrl / ⌘ + C</b> 复制；手机上长按选择「拷贝」。</p>' +
+      '<textarea rows="4" readonly style="width:100%;font-family:var(--mono);font-size:13px;line-height:1.6">' +
+        esc(text) + "</textarea>",
+      null, "关闭");
+    var box = $("#modals textarea");
+    if (box) { box.focus(); box.select(); }
+  }
 
   function api(path, method, body) {
     var opt = { method: method || "GET", headers: {} };
@@ -424,18 +662,18 @@
           "</tr></thead><tbody>" +
           list.map(function (p) {
             return "<tr>" +
-              "<td><strong>" + esc(p.name) + "</strong></td>" +
-              '<td class="key">' + esc(p.app_id) + "</td>" +
-              '<td><span class="badge b-off">' + esc(p.sign_alg) + "</span></td>" +
-              "<td>" + (p.default_expires_at ? esc(fmtLocal(p.default_expires_at)) : '<span class="badge b-info">永久</span>') + "</td>" +
-              '<td class="num">' + esc(p.default_grace_days) + " 天</td>" +
-              '<td class="num">' + esc(p.max_devices) + "</td>" +
-              '<td class="num">' + esc(p.offline_grace_days) + " 天</td>" +
-              "<td>" + (p.fail_mode === "hard"
+              '<td class="cell-title">' + esc(p.name) + "</td>" +
+              '<td class="key" data-label="app_id">' + esc(p.app_id) + "</td>" +
+              '<td data-label="签名算法"><span class="badge b-off">' + esc(p.sign_alg) + "</span></td>" +
+              '<td data-label="默认到期">' + (p.default_expires_at ? esc(fmtLocal(p.default_expires_at)) : '<span class="badge b-info">永久</span>') + "</td>" +
+              '<td class="num" data-label="宽限">' + esc(p.default_grace_days) + " 天</td>" +
+              '<td class="num" data-label="设备数">' + esc(p.max_devices) + "</td>" +
+              '<td class="num" data-label="离线容忍">' + esc(p.offline_grace_days) + " 天</td>" +
+              '<td data-label="到期行为">' + (p.fail_mode === "hard"
                 ? '<span class="badge b-danger">直接闪退</span>'
                 : '<span class="badge b-warn">提示后退出</span>') + "</td>" +
-              '<td class="nowrap">' +
-                '<button class="tiny" data-edit-prod="' + esc(p.id) + '">编辑</button> ' +
+              '<td class="acts" data-label="操作">' +
+                '<button class="tiny" data-edit-prod="' + esc(p.id) + '">编辑</button>' +
                 '<button class="tiny danger" data-del-prod="' + esc(p.id) + '">删除</button>' +
               "</td></tr>";
           }).join("") + "</tbody></table>"
@@ -506,21 +744,34 @@
 
   /* ---------------------------- 授权码 ---------------------------- */
 
+  /* 分页状态。后端 /admin/api/licenses 支持 limit/offset 并返回 total，
+     前端之前写死 limit=200 且没有翻页入口 —— 超过 200 条就看不到了。 */
+  var PAGE_SIZE = 50;
+  var PAGE = { offset: 0, total: 0 };
+
   function loadLicenses() {
     var qs = [];
     if ($("#fProduct").value) qs.push("product_id=" + encodeURIComponent($("#fProduct").value));
     if ($("#fStatus").value) qs.push("status=" + encodeURIComponent($("#fStatus").value));
     if ($("#fQuery").value.trim()) qs.push("q=" + encodeURIComponent($("#fQuery").value.trim()));
-    qs.push("limit=200");
+    qs.push("limit=" + PAGE_SIZE);
+    qs.push("offset=" + PAGE.offset);
 
     return api("/licenses?" + qs.join("&")).then(function (res) {
       CACHE.licenses = res.items;
+      PAGE.total = Number(res.total || 0);
       if (res.server_time) {
         $("#srvTime").textContent = "服务端 " + new Date(res.server_time * 1000).toLocaleString();
       }
+      // 删掉当前页最后一条后本页会空，自动退回上一页，避免停在空白页
+      if (!res.items.length && PAGE.offset > 0) {
+        PAGE.offset = Math.max(0, PAGE.offset - PAGE_SIZE);
+        return loadLicenses();
+      }
       if (!res.items.length) {
         $("#licTableWrap").innerHTML = '<div class="empty">没有符合条件的授权码</div>';
-        return;
+        renderPager(0);
+        return null;
       }
       $("#licTableWrap").innerHTML =
         '<table><thead><tr>' +
@@ -529,21 +780,59 @@
         res.items.map(function (l) {
           var prod = productOf(l.product_id);
           return '<tr data-id="' + esc(l.id) + '">' +
-            '<td class="key">' + esc(l.key_display) + "</td>" +
-            "<td>" + esc(prod ? prod.name : l.product_id) + "</td>" +
-            "<td>" + esc(l.customer || "-") + (l.note ? '<div class="muted" style="font-size:12px">' + esc(l.note) + "</div>" : "") + "</td>" +
-            "<td>" + expiryCell(l, prod) + "</td>" +
-            '<td class="num">' + esc(l.activation_count || 0) + " / " + esc((l.max_devices !== null && l.max_devices !== undefined) ? l.max_devices : (prod ? prod.max_devices : 1)) + "</td>" +
-            "<td>" + statusBadge(l.status) + "</td>" +
-            '<td class="nowrap">' +
-              '<button class="tiny" data-edit="' + esc(l.id) + '">改到期</button> ' +
-              '<button class="tiny" data-devices="' + esc(l.id) + '">设备</button> ' +
-              '<button class="tiny" data-toggle="' + esc(l.id) + '">' + (l.status === "active" ? "停用" : "启用") + "</button> " +
+            '<td class="cell-title key">' + esc(l.key_display) + "</td>" +
+            '<td data-label="软件">' + esc(prod ? prod.name : l.product_id) + "</td>" +
+            '<td class="cell-wrap" data-label="客户 / 备注">' + esc(l.customer || "-") + (l.note ? '<div class="muted" style="font-size:12px">' + esc(l.note) + "</div>" : "") + "</td>" +
+            '<td data-label="到期">' + expiryCell(l, prod) + "</td>" +
+            '<td class="num" data-label="设备">' + esc(l.activation_count || 0) + " / " + esc((l.max_devices !== null && l.max_devices !== undefined) ? l.max_devices : (prod ? prod.max_devices : 1)) + "</td>" +
+            '<td data-label="状态">' + statusBadge(l.status) + "</td>" +
+            '<td class="acts" data-label="操作">' +
+              '<button class="tiny" data-copy="' + esc(l.id) + '">复制</button>' +
+              '<button class="tiny" data-edit="' + esc(l.id) + '">改到期</button>' +
+              '<button class="tiny" data-devices="' + esc(l.id) + '">设备</button>' +
+              '<button class="tiny" data-toggle="' + esc(l.id) + '">' + (l.status === "active" ? "停用" : "启用") + "</button>" +
               '<button class="tiny danger" data-del="' + esc(l.id) + '">删除</button>' +
             "</td></tr>";
         }).join("") + "</tbody></table>";
+      renderPager(res.items.length);
       return res;
     });
+  }
+
+  /** 渲染分页条。total 由后端返回，是本条件下的总条数，不是本页条数。 */
+  function renderPager(shown) {
+    var el = $("#licPager");
+    if (!el) return;
+    var total = PAGE.total;
+    var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    var page = Math.floor(PAGE.offset / PAGE_SIZE) + 1;
+
+    if (!total) {
+      el.innerHTML = '<span class="info">共 0 条</span>';
+      return;
+    }
+    el.innerHTML =
+      '<span class="info">共 ' + total + ' 条 · 第 ' + page + " / " + pages + " 页（本页 " + shown + " 条）</span>" +
+      '<span class="spacer"></span>' +
+      '<button class="tiny" data-page="first"' + (page <= 1 ? " disabled" : "") + '>&laquo; 首页</button>' +
+      '<button class="tiny" data-page="prev"' + (page <= 1 ? " disabled" : "") + ">&lsaquo; 上一页</button>" +
+      '<button class="tiny" data-page="next"' + (page >= pages ? " disabled" : "") + ">下一页 &rsaquo;</button>" +
+      '<button class="tiny" data-page="last"' + (page >= pages ? " disabled" : "") + ">末页 &raquo;</button>";
+  }
+
+  /** 翻页。which: first | prev | next | last */
+  function gotoPage(which) {
+    var pages = Math.max(1, Math.ceil(PAGE.total / PAGE_SIZE));
+    var page = Math.floor(PAGE.offset / PAGE_SIZE) + 1;
+    var target = page;
+    if (which === "first") target = 1;
+    else if (which === "prev") target = page - 1;
+    else if (which === "next") target = page + 1;
+    else if (which === "last") target = pages;
+    target = Math.min(Math.max(target, 1), pages);
+    if (target === page) return;
+    PAGE.offset = (target - 1) * PAGE_SIZE;
+    loadLicenses().catch(function (e) { toast(e.message, "err"); });
   }
 
   /* --- 生成授权码 --- */
@@ -592,8 +881,21 @@
         var detail =
           '<p class="muted" style="margin-top:0">已生成 ' + res.created.length + " 个授权码，到期时间：" +
             esc(res.created[0].expires_at ? fmtLocal(res.created[0].expires_at) : "永久") + "</p>" +
-          '<div class="keybox">' + res.created.map(function (c) { return esc(c.key); }).join("<br/>") + "</div>" +
-          '<label class="field" style="margin-top:14px"><span>批量复制</span><textarea rows="5" readonly>' + esc(keys) + "</textarea></label>";
+          '<div class="keylist">' +
+            res.created.map(function (c) {
+              return '<div class="keyrow"><code>' + esc(c.key) + "</code>" +
+                     '<button class="tiny" data-copy-key="' + attr(c.key) + '">复制</button></div>';
+            }).join("") +
+          "</div>" +
+          (res.created.length > 1
+            ? '<div style="margin-top:12px">' +
+                '<button class="primary" data-copy-key="' + attr(keys) + '">复制全部 ' +
+                res.created.length + " 个</button></div>"
+            : "") +
+          '<div class="copy-hint">直接粘贴到发货信息里即可' +
+            (res.created.length > 1 ? "；「复制全部」以换行分隔，可整列贴进 Excel" : "") + "。</div>" +
+          '<label class="field" style="margin-top:14px"><span>手动复制（剪贴板不可用时全选复制）</span>' +
+            '<textarea rows="4" readonly>' + esc(keys) + "</textarea></label>";
         openModal("生成成功", detail, null, "关闭");
       }).catch(function (e) { toast(e.message, "err"); });
     });
@@ -604,7 +906,9 @@
     api("/licenses/" + id).then(function (l) {
       var prod = l.product || productOf(l.product_id);
       var html =
-        '<p class="muted" style="margin-top:0"><code class="inline">' + esc(l.key_display) + "</code> · " + esc(prod ? prod.name : "") + "</p>" +
+        '<div class="keyrow" style="margin-bottom:14px"><code>' + esc(l.key_display) + "</code>" +
+          '<button class="tiny" data-copy-key="' + attr(l.key_display) + '">复制</button></div>' +
+        '<p class="muted" style="margin-top:0">' + esc(prod ? prod.name : "") + "</p>" +
         '<label class="field"><span>到期时间（清空 = 永久）</span>' +
           '<input type="datetime-local" id="eExp" value="' + esc(toInputValue(l.expires_at)) + '" /></label>' +
         '<div class="row2">' +
@@ -660,11 +964,11 @@
         ? '<table><thead><tr><th>机器码</th><th>设备名</th><th>平台</th><th>最后在线</th><th></th></tr></thead><tbody>' +
           acts.map(function (a) {
             return "<tr>" +
-              '<td class="key" title="' + esc(a.machine_id) + '">' + esc(String(a.machine_id).slice(0, 16)) + "…</td>" +
-              "<td>" + esc(a.machine_name || "-") + "</td>" +
-              "<td>" + esc(a.platform || "-") + "</td>" +
-              '<td class="nowrap">' + esc(fmtLocal(a.last_seen_at)) + "</td>" +
-              '<td><button class="tiny danger" data-unbind="' + esc(a.id) + '">解绑</button></td></tr>';
+              '<td class="cell-title key" title="' + esc(a.machine_id) + '">' + esc(String(a.machine_id).slice(0, 16)) + "…</td>" +
+              '<td data-label="设备名">' + esc(a.machine_name || "-") + "</td>" +
+              '<td data-label="平台">' + esc(a.platform || "-") + "</td>" +
+              '<td class="nowrap" data-label="最后在线">' + esc(fmtLocal(a.last_seen_at)) + "</td>" +
+              '<td class="acts" data-label="操作"><button class="tiny danger" data-unbind="' + esc(a.id) + '">解绑</button></td></tr>';
           }).join("") + "</tbody></table>"
         : '<div class="empty">该授权码还没有激活任何设备</div>';
       html += '<div style="margin-top:14px"><button class="danger" id="resetAll">清空全部设备（释放设备位）</button></div>';
@@ -690,12 +994,12 @@
         ? '<table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>详情</th><th>IP</th></tr></thead><tbody>' +
           rows.map(function (r) {
             return "<tr>" +
-              '<td class="nowrap">' + esc(fmtLocal(r.ts)) + "</td>" +
-              "<td>" + esc(r.actor || "-") + "</td>" +
-              '<td><code class="inline">' + esc(r.action) + "</code></td>" +
-              '<td class="key">' + esc(r.target || "-") + "</td>" +
-              '<td class="muted" style="max-width:340px;overflow:hidden;text-overflow:ellipsis">' + esc(r.detail || "-") + "</td>" +
-              "<td>" + esc(r.ip || "-") + "</td></tr>";
+              '<td class="cell-title nowrap">' + esc(fmtLocal(r.ts)) + "</td>" +
+              '<td data-label="操作者">' + esc(r.actor || "-") + "</td>" +
+              '<td data-label="动作"><code class="inline">' + esc(r.action) + "</code></td>" +
+              '<td class="key" data-label="目标">' + esc(r.target || "-") + "</td>" +
+              '<td class="muted detail" data-label="详情">' + esc(r.detail || "-") + "</td>" +
+              '<td data-label="IP">' + esc(r.ip || "-") + "</td></tr>";
           }).join("") + "</tbody></table>"
         : '<div class="empty">暂无日志</div>';
     });
@@ -743,6 +1047,17 @@
     var t = e.target.closest ? e.target.closest("button") : null;
     if (!t) return;
     var d = t.dataset;
+
+    /* 复制类按钮优先级最高：都是纯前端动作，不发请求 */
+    if (d.copy) {
+      var lic = CACHE.licenses.filter(function (x) { return x.id === d.copy; })[0];
+      if (!lic) return toast("该授权码已不在当前列表中，请刷新", "err");
+      return copyAndToast(lic.key_display, t, "授权码已复制");
+    }
+    /* 翻页按钮 */
+    if (d.page) return gotoPage(d.page);
+
+    if (d.copyKey) return copyAndToast(d.copyKey, t, "已复制");
 
     if (d.edit) return editLicense(d.edit);
     if (d.devices) return showDevices(d.devices);
@@ -792,10 +1107,13 @@
   });
 
   $("#newProdBtn").onclick = function () { productForm(null); };
-  $("#searchBtn").onclick = function () { loadLicenses(); };
-  $("#fProduct").onchange = function () { loadLicenses(); };
-  $("#fStatus").onchange = function () { loadLicenses(); };
-  $("#fQuery").addEventListener("keydown", function (e) { if (e.key === "Enter") loadLicenses(); });
+  /* 筛选项变化一律回到第一页：换条件后当前 offset 多半越界 */
+  $("#searchBtn").onclick = function () { PAGE.offset = 0; loadLicenses(); };
+  $("#fProduct").onchange = function () { PAGE.offset = 0; loadLicenses(); };
+  $("#fStatus").onchange = function () { PAGE.offset = 0; loadLicenses(); };
+  $("#fQuery").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { PAGE.offset = 0; loadLicenses(); }
+  });
 
   /* ---------------------------- 启动 ---------------------------- */
 

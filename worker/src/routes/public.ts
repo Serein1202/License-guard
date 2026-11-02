@@ -23,6 +23,7 @@ import {
   normalizeKey,
   nowSec,
   rateLimit,
+  rateLimitOf,
 } from "../util";
 
 interface ActivateBody {
@@ -127,7 +128,9 @@ export async function handleActivate(req: Request, env: Env, url: URL): Promise<
   if (!machineId) return fail("BAD_REQUEST", "缺少 machine_id", 400);
 
   const meta = clientMeta(req);
-  if (!(await rateLimit(env.KV, `act:${meta.ip}`, 30))) {
+  // 桶里带 app_id：不同产品的激活流量互不挤占。
+  // 上限可配（RATE_LIMIT_ACTIVATE），同一个 NAT 出口机器多时调大即可。
+  if (!(await rateLimit(env.KV, `act:${appId}:${meta.ip}`, rateLimitOf(env.RATE_LIMIT_ACTIVATE, 30)))) {
     return fail("RATE_LIMITED", "请求过于频繁，请稍后再试", 429);
   }
 
@@ -141,7 +144,8 @@ export async function handleActivate(req: Request, env: Env, url: URL): Promise<
   }
 
   // v1 指纹升级到 v2 后 machine_id 会变，这里先认旧账再判定，避免老用户被当成新设备
-  const effectiveMachineId = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  const resolved = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  const effectiveMachineId = resolved.canonicalId;
 
   const verdict = await evaluate(env, { product, license, machineId: effectiveMachineId, requireActivation: false });
   if (!verdict.allowed) {
@@ -181,7 +185,8 @@ export async function handleActivate(req: Request, env: Env, url: URL): Promise<
 
   return json(
     await buildActivationResponse(
-      env, product, license.id, effectiveMachineId, license.customer, features, verdict,
+      // 令牌 mid 用客户端自报的指纹，设备档用规范主键：降级回旧 SDK 时两者不同
+      env, product, license.id, resolved.signId, license.customer, features, verdict,
       await countActivations(env, license.id),
     ),
   );
@@ -199,7 +204,7 @@ export async function handleVerify(req: Request, env: Env, url: URL): Promise<Re
   if (!appId || !rawKey || !machineId) return fail("BAD_REQUEST", "缺少参数", 400);
 
   const meta = clientMeta(req);
-  if (!(await rateLimit(env.KV, `vfy:${meta.ip}`, 120))) {
+  if (!(await rateLimit(env.KV, `vfy:${appId}:${meta.ip}`, rateLimitOf(env.RATE_LIMIT_VERIFY, 120)))) {
     return fail("RATE_LIMITED", "请求过于频繁", 429);
   }
 
@@ -211,7 +216,8 @@ export async function handleVerify(req: Request, env: Env, url: URL): Promise<Re
 
   // 注意：verify 不会占用新的设备位。
   // 未激活过的设备必须先走 /v1/activate，否则这里返回 DEVICE_NOT_ACTIVATED。
-  const effectiveMachineId = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  const resolved = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  const effectiveMachineId = resolved.canonicalId;
   const verdict = await evaluate(env, { product, license, machineId: effectiveMachineId, requireActivation: true });
   if (!verdict.allowed) {
     await audit(env, { actor: "app", action: "verify.deny", target: license.id, detail: verdict.code, ip: meta.ip });
@@ -237,7 +243,8 @@ export async function handleVerify(req: Request, env: Env, url: URL): Promise<Re
 
   return json(
     await buildActivationResponse(
-      env, product, license.id, effectiveMachineId, license.customer, features, verdict,
+      // 令牌 mid 用客户端自报的指纹，设备档用规范主键：降级回旧 SDK 时两者不同
+      env, product, license.id, resolved.signId, license.customer, features, verdict,
       await countActivations(env, license.id),
     ),
   );
@@ -263,7 +270,8 @@ export async function handleDeactivate(req: Request, env: Env, url: URL): Promis
   if (!license || license.product_id !== product.id) return fail("KEY_NOT_FOUND", "授权码不存在", 404);
 
   // 老记录可能还挂在旧指纹上，先迁移再解绑，否则解不干净
-  const effectiveMachineId = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  const resolved = await resolveMachineId(env, license.id, machineId, body.machine_id_alt);
+  const effectiveMachineId = resolved.canonicalId;
   await deleteActivationByMachine(env, license.id, effectiveMachineId);
   await audit(env, { actor: "app", action: "deactivate", target: license.id, detail: { machineId: effectiveMachineId }, ...clientMeta(req) });
   return json({ released: true });

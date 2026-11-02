@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AotCompat</AssemblyName>
+    <RootNamespace>AotCompat</RootNamespace>
+
+    <!-- 与 SDK 本体相同的 AOT / 裁剪分析器开关，保证两边判定一致 -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 直接编译被测源文件，测的就是仓库里那一份，不做副本 -->
+    <Compile Include="..\..\LicenseGuard.cs" Link="LicenseGuard.cs" />
+  </ItemGroup>
+
+</Project>

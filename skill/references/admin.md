@@ -85,7 +85,9 @@ curl -X POST "$ADMIN_URL/api/licenses" \
 | `customer` / `note` | 客户名 / 备注 |
 | `grace_days` / `max_devices` | 覆盖产品默认值，`null` = 继承 |
 
-返回里含**明文授权码**，这是唯一一次能拿到明文的时机之一（后台列表是掩码展示的）。
+返回里含**明文授权码**，这是唯一一次能拿到明文的时机之一（后台列表当前也是明文展示，每行有「复制」按钮，点一下进剪贴板；生成成功弹窗里还有「复制全部」，多行以换行分隔）。
+
+后台列表带分页（每页 50 条，`limit`/`offset` + 返回 `total`）；接口本身没有分页限制，`limit` 最大可传 200。
 
 ### 改到期时间 —— 最常用的操作
 
@@ -111,8 +113,8 @@ curl -X PATCH "$ADMIN_URL/api/licenses/lic_xxx" \
   -d '{"status":"revoked"}'      # active | suspended | revoked
 ```
 
-**生效时机**：客户端默认 `online_check_interval_sec = 0`，即每次校验都必须联网，
-所以后台一改，客户端下次校验（启动时或看门狗周期）就会失效。
+**生效时机**：客户端默认 `online_check_interval_sec = 0`（Node 为 `onlineCheckIntervalSec`、C# 为 `OnlineCheckIntervalSeconds`），即每次校验都必须联网，
+所以后台一改，客户端下次校验（启动时或看门狗周期，默认 120 秒）就会失效。
 服务端明确判失效时客户端会**同时清掉本地缓存令牌**，防止用户靠断网续命。
 
 ### 设备管理（换机解绑）
@@ -159,4 +161,4 @@ curl "$ADMIN_URL/api/audit?limit=100" -H "Authorization: Bearer $TOKEN"
 | 旧机器已损坏 | `POST /licenses/{id}/reset` 清空全部设备位 |
 | 到期立刻生效（不等到期日） | 把 `expires_at` 改成过去时间 |
 | 断网也想失效 | 产品设 `offline_grace_days: 0` |
-| 想少发请求 | 客户端设 `online_check_interval_sec`（代价：后台改动生效变慢） |
+| 想少发请求 | 客户端设 `online_check_interval_sec`（Node/C# 同名不同写法，代价：后台改动生效变慢） |

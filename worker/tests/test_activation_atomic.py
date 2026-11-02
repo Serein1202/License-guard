@@ -31,8 +31,15 @@ SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?9
    country      = excluded.country
 """
 
-MIGRATE_SQL = ("UPDATE OR IGNORE activations SET machine_id = ?1 "
+# 与 db.ts::resolveMachineId 的第 3 步保持一致：
+# 迁主键的同时把旧指纹留在 machine_id_alt，供客户端降级回旧 SDK 时认回本机。
+# COALESCE 保证连续迁移（v1→v2→v3）时最早的 alt 不被覆盖。
+MIGRATE_SQL = ("UPDATE OR IGNORE activations "
+               "SET machine_id = ?1, machine_id_alt = COALESCE(machine_id_alt, ?3) "
                "WHERE license_id = ?2 AND machine_id = ?3")
+
+# 与 db.ts::resolveMachineId 的第 2 步保持一致：按 alt 认回降级的客户端
+BY_ALT_SQL = "SELECT * FROM activations WHERE license_id = ?1 AND machine_id_alt = ?2"
 
 
 def new_db():
@@ -41,7 +48,8 @@ def new_db():
         CREATE TABLE activations (
           id            TEXT PRIMARY KEY,
           license_id    TEXT NOT NULL,
-          machine_id    TEXT NOT NULL,
+          machine_id      TEXT NOT NULL,
+          machine_id_alt  TEXT,
           machine_name  TEXT,
           app_version   TEXT,
           platform      TEXT,
@@ -113,6 +121,22 @@ def main():
                 con.execute("SELECT COUNT(*) FROM activations WHERE license_id=? AND machine_id=?",
                             (lic, "new_fp")).fetchone()[0] == 1)
     ok &= check("迁移不新增设备位", count(con, lic) == 1)
+
+    ok &= check("迁移时把旧指纹记进 machine_id_alt",
+                con.execute("SELECT machine_id_alt FROM activations WHERE license_id=? AND machine_id=?",
+                            (lic, "new_fp")).fetchone()[0] == "legacy_fp")
+
+    # 用例 4b：客户端降级回旧 SDK，只上报 v1 指纹 —— 必须能按 alt 认回同一台设备
+    row = con.execute(BY_ALT_SQL, (lic, "legacy_fp")).fetchone()
+    ok &= check("降级上报 v1 能按 alt 命中记录", row is not None)
+    ok &= check("降级命中后不新增设备位", count(con, lic) == 1)
+
+    # 用例 4c：连续迁移不冲掉最早的 alt
+    con.execute(MIGRATE_SQL, ("newer_fp", lic, "new_fp"))
+    con.commit()
+    ok &= check("连续迁移保留最早的 alt",
+                con.execute("SELECT machine_id_alt FROM activations WHERE license_id=? AND machine_id=?",
+                            (lic, "newer_fp")).fetchone()[0] == "legacy_fp")
 
     # 用例 5：新指纹已被另一台设备占用时，UPDATE OR IGNORE 不覆盖对方记录
     con = new_db()

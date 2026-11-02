@@ -402,6 +402,7 @@ export class LicenseGuard {
       heartbeatSec: 21600,
       watchdogIntervalSec: 120,  // >0 = 固定复查间隔（不被后端心跳覆盖）；0 = 跟随后端 heartbeatSec
       heartbeatCapSec: 900,      // 仅在 watchdogIntervalSec = 0 时生效：本地复查间隔上限
+      onlineCheckIntervalSec: 0, // 缓存令牌免联网的最长时间；0 = 每次 verify 都联网（封禁即时生效）
       storageDir: null,
       onDenied: null,            // (code, message) => void；设了它就不会自动退出
       debug: false,
@@ -445,6 +446,71 @@ export class LicenseGuard {
     return "";
   }
 
+  async _get(path) {
+    const url = this.serverUrl + path;
+    let lastErr = null;
+    for (let attempt = 0; attempt < Math.max(1, this.opts.retryTimes); attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), this.opts.requestTimeoutMs);
+      try {
+        const res = await fetch(url, { method: "GET", signal: ctrl.signal });
+        const json = await res.json().catch(() => null);
+        clearTimeout(timer);
+        if (!json) {
+          lastErr = new Error("响应不是合法 JSON");
+        } else if (!res.ok && [401, 403, 404, 409, 429].includes(res.status)) {
+          return json;                        // 服务端明确拒绝，不重试
+        } else {
+          return json;
+        }
+      } catch (e) {
+        lastErr = e;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (attempt < this.opts.retryTimes - 1) {
+        await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+      }
+    }
+    this._log("网络不可用:", lastErr && lastErr.message);
+    return null;
+  }
+
+  /**
+   * 主动取一次服务端权威时间，算出本机时钟偏差（skew = 服务端时间 − 本机挂钟）并落盘。
+   *
+   * 作用是让「把系统时间调回过去」这类绕过在本地就算得出来：后续到期判定都用
+   * `挂钟 + skew`，而不是裸的本地时间。server_time 带签名，中间人改不了；
+   * 这里还会比对签名里的 t 与明文 server_time，不一致直接抛错。
+   *
+   * 离线时抛 NETWORK；正常校验路径不依赖它，调用方可不处理。
+   * @returns {Promise<number>} 本次测得的时钟偏差（秒），正数表示本机偏慢
+   */
+  async syncTime() {
+    this._state = this.store.load() || {};
+    if (this._state.__tampered__) {
+      await this.store.clear();
+      this._state = {};
+    }
+
+    const resp = await this._get(`/v1/time?app_id=${encodeURIComponent(this.opts.appId)}`);
+    if (!resp) this._raise("NETWORK", "无法连接授权服务器获取时间");
+    if (!resp.ok) this._raise(resp.code || "DENIED", resp.message || "获取服务端时间失败");
+
+    const serverTime = Number(resp.data.server_time);
+    // 必须验签：明文 server_time 可被中间人改，签名里的 t 才是可信值
+    const payload = verifyToken(resp.data.token, this.opts.publicKey, resp.data.sign_alg || this.opts.signAlg);
+    if (Number(payload.t) !== serverTime) {
+      this._raise("BAD_TOKEN", "服务端时间令牌与明文时间不一致");
+    }
+
+    const skew = serverTime - nowSec();
+    this._state.clock_skew = skew;
+    this.store.save(this._state);
+    this._log("时钟同步完成:", `server=${serverTime}`, `skew=${skew}s`);
+    return skew;
+  }
+
   async _post(path, body) {
     const url = this.serverUrl + path;
     let lastErr = null;
@@ -480,20 +546,55 @@ export class LicenseGuard {
     return null;
   }
 
+  /**
+   * 算出用于到期判定的「当前时间」，并顺带检测系统时间被回拨。
+   *
+   * 时间口径 = 本机挂钟 + clock_skew（上次联网测得的服务端偏差，见 syncTime()）。
+   * 没有 skew 时退化为裸挂钟，与旧版行为一致。
+   *
+   * 两条回拨检测分别对应两个口径，互不干扰：
+   *   1. 挂钟 vs 上次记录的挂钟（last_wall）—— 覆盖没有 skew 的情况
+   *   2. 校正时间 vs 上次服务端时间（last_online）—— 覆盖「改了时间且本地有 skew」的情况
+   */
   _effectiveNow(state) {
     const wall = nowSec();
-    const last = Number(state.last_wall || 0);
-    if (last && wall < last - this.opts.clockToleranceSec) {
-      this._log(`检测到系统时间回拨: now=${wall} last=${last}`);
-      return { now: last, tampered: true };
+    const lastWall = Number(state.last_wall || 0);
+    if (lastWall && wall < lastWall - this.opts.clockToleranceSec) {
+      this._log(`检测到系统时间回拨: now=${wall} last=${lastWall}`);
+      return { now: lastWall, tampered: true };
     }
-    return { now: wall, tampered: false };
+
+    const now = wall + Number(state.clock_skew || 0);
+    const lastOnline = Number(state.last_online || 0);
+    if (lastOnline && now < lastOnline - this.opts.clockToleranceSec) {
+      this._log(`检测到服务端时间回拨: now=${now} last_online=${lastOnline}`);
+      return { now: lastOnline, tampered: true };
+    }
+    return { now, tampered: false };
   }
 
   _offlineUntil() {
     const last = Number(this._state.last_online || 0);
     if (!last) return 0;
     return last + Number(this._state.offline_grace_days || 0) * DAY;
+  }
+
+  /**
+   * 缓存令牌能否直接放行（完全不联网）。exp 已在调用处判过，这里只判另外两条：
+   *   1. 离线容忍期未耗尽（last_online + offline_grace_days）
+   *   2. 距上次成功联网未超过 onlineCheckIntervalSec
+   *
+   * 第 2 条是关键：间隔为 0 时恒 false，即每次 verify 都联网，
+   * 后台吊销 / 改期 / 设过期立即生效；真连不上时才走离线容忍兜底。
+   */
+  _canSkipOnline(now) {
+    if (now > this._offlineUntil()) return false;
+
+    const interval = Number(this.opts.onlineCheckIntervalSec || 0);
+    if (interval <= 0) return false;
+
+    const lastOnline = Number(this._state.last_online || 0);
+    return lastOnline > 0 && now - lastOnline < interval;
   }
 
   _expiredMsg(payload) {
@@ -547,13 +648,17 @@ export class LicenseGuard {
     }
 
     if (payload) {
-      if (payload.mid && payload.mid !== this.machineId) {
+      // 同时接受 v2 与 v1 指纹：升级 SDK 后本地令牌仍是 v1 指纹签发。
+      // 只认 v2 会在联网前直接判 MACHINE_MISMATCH，永远走不到服务端的迁移逻辑。
+      const acceptedMids = [this.machineId, legacyMachineId()];
+      if (payload.mid && !acceptedMids.includes(payload.mid)) {
         this._raise("MACHINE_MISMATCH", "该授权绑定了另一台设备");
       }
       if (payload.hexp && now > Number(payload.hexp)) {
         this._raise("LICENSE_EXPIRED", this._expiredMsg(payload));
       }
-      if (now <= Number(payload.exp || 0) && now <= this._offlineUntil()) {
+      // allowOffline=false 表示调用方要求必须拿到服务端确认，此时跳过快速通道强制联网
+      if (allowOffline && now <= Number(payload.exp || 0) && this._canSkipOnline(now)) {
         this._state.last_wall = now;
         this.store.save(this._state);
         this._info = this._infoFromPayload(payload, true);
@@ -611,6 +716,8 @@ export class LicenseGuard {
       license_key: rawKey,
       offline_grace_days: Number(policy.offline_grace_days || 0),
       heartbeat_sec: Number(policy.heartbeat_sec || this.opts.heartbeatSec),
+      // 每次联网都重测一次偏差，避免长时间离线后 skew 过期
+      clock_skew: Number(data.server_time || now) - nowSec(),
       install_id: this._state.install_id || randomUUID(),
     };
     this.store.save(this._state);

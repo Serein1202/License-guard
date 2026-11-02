@@ -10,6 +10,24 @@
     <RootNamespace>LicenseGuard</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!--
+      AOT / 裁剪兼容性门禁。
+      IsAotCompatible 会打开 IL2026（要求未被裁剪掉的反射）与
+      IL3050（要求运行时代码生成）分析器 —— 以后谁再写回
+      JsonSerializer.Serialize(object) 这类反射序列化，build 立刻出警告。
+      这一层不需要 MSVC 链接器，本机就能验证；真正的 NativeAOT 落盘
+      需要 VS2022 C++ 工具链，见 docs/AOT.md。
+    -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- tests/ 下是独立项目（AOT 兼容性自证），不能被 SDK 的默认 glob 卷进本程序集 -->
+    <Compile Remove="tests/**/*.cs" />
+    <None Remove="tests/**" />
+  </ItemGroup>
 
 </Project>

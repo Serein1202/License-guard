@@ -25,11 +25,11 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace LicenseGuard;
 
@@ -74,6 +74,19 @@ public sealed class GuardOptions
 
     /// <summary>仅在 <see cref="WatchdogIntervalSeconds"/> = 0 时生效：本地复查间隔上限（秒）。0 = 不封顶。</summary>
     public int HeartbeatCapSeconds { get; set; } = 900;
+
+    /// <summary>
+    /// 缓存令牌能跳过联网的最长时间（秒）。默认 0 = 每次 <see cref="LicenseGuard.VerifyAsync"/> 都联网。
+    /// <para>
+    /// 这个值直接决定后台「封禁 / 改期 / 设过期」的最坏生效延迟，与 <c>token_ttl_sec</c> 无关：
+    /// <c>token_ttl_sec</c> 管的是断网后本地还能撑多久，本项管的是多久主动回连一次。
+    /// </para>
+    /// <para>
+    /// 调大的唯一理由是在高 QPS 场景省请求；代价是封禁延迟变长。
+    /// 服务端连不上时仍走离线容忍兜底（<c>offline_grace_days</c>）。
+    /// </para>
+    /// </summary>
+    public int OnlineCheckIntervalSeconds { get; set; } = 0;
 
     public string? StorageDirectory { get; set; }
 
@@ -180,18 +193,38 @@ public sealed class LicenseGuard
     }
 
     // ------------------------------------------------------------ 网络请求
-    private async Task<JsonElement?> PostAsync(string path, object payload)
+
+    /// <summary>
+    /// POST 一个扁平 JSON 对象（键值全部是字符串），返回响应根节点。
+    ///
+    /// 参数用 (key, value) 元组数组而不是匿名对象：匿名对象只能交给
+    /// <c>JsonSerializer.Serialize(object)</c> 序列化，那条路径要走运行时反射生成类型元数据，
+    /// 在 NativeAOT / 完全裁剪下会触发 IL2026 / IL3050，运行时直接抛
+    /// <c>NotSupportedException</c>。这里改用命令式 <see cref="Utf8JsonWriter"/>，零反射。
+    /// </summary>
+    private Task<JsonElement?> PostAsync(string path, params (string Key, string? Value)[] fields)
+        => SendAsync(HttpMethod.Post, path, JsonValue.Object(fields));
+
+    /// <summary>GET 一个 JSON 接口。重试 / 超时 / 状态码策略与 <see cref="PostAsync"/> 完全一致。</summary>
+    private Task<JsonElement?> GetAsync(string path) => SendAsync(HttpMethod.Get, path, null);
+
+    private async Task<JsonElement?> SendAsync(HttpMethod method, string path, byte[]? body)
     {
-        var body = JsonSerializer.Serialize(payload);
         Exception? last = null;
+        var url = _o.ServerUrl + path;
 
         for (var attempt = 0; attempt < Math.Max(1, _o.RetryTimes); attempt++)
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_o.RequestTimeoutSeconds));
             try
             {
-                using var content = new StringContent(body, Encoding.UTF8, "application/json");
-                using var resp = await Http.PostAsync(_o.ServerUrl + path, content, cts.Token).ConfigureAwait(false);
+                using var req = new HttpRequestMessage(method, url);
+                if (body is not null)
+                {
+                    req.Content = new ByteArrayContent(body);
+                    req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+                }
+                using var resp = await Http.SendAsync(req, cts.Token).ConfigureAwait(false);
                 var text = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
                 var doc = JsonDocument.Parse(text);
                 var root = doc.RootElement.Clone();
@@ -212,6 +245,53 @@ public sealed class LicenseGuard
 
         Log("网络不可用: " + last?.Message);
         return null;
+    }
+
+    /// <summary>
+    /// 主动向服务端取一次权威时间，算出本机时钟偏差（skew = 服务端时间 − 本机挂钟）并落盘。
+    /// <para>
+    /// 作用是让「把系统时间调回过去」这类绕过在本地就算得出来：后续所有到期判定都用
+    /// <c>挂钟 + skew</c>，而不是裸的本地时间。返回的 <c>server_time</c> 带 Ed25519 签名，
+    /// 中间人改不了；这里还会比对签名里的 t 与明文 server_time，不一致直接拒绝。
+    /// </para>
+    /// <para>离线时抛 <c>NETWORK</c>；调用方可以不处理，正常校验路径不依赖它。</para>
+    /// </summary>
+    /// <returns>本次测得的时钟偏差（秒），正数表示本机偏慢。</returns>
+    public async Task<long> SyncTimeAsync()
+    {
+        _state = _store.Load();
+        if (_state.ContainsKey("__tampered__"))
+        {
+            _store.Clear();
+            _state.Clear();
+        }
+
+        var resp = await GetAsync("/v1/time?app_id=" + Uri.EscapeDataString(_o.AppId)).ConfigureAwait(false);
+        if (resp is null)
+            throw new LicenseException("NETWORK", "无法连接授权服务器获取时间");
+
+        var root = resp.Value;
+        if (!root.TryGetProperty("ok", out var okEl) || !okEl.GetBoolean())
+        {
+            var code = root.TryGetProperty("code", out var c) ? c.GetString() ?? "DENIED" : "DENIED";
+            var msg = root.TryGetProperty("message", out var m) ? m.GetString() ?? "获取服务端时间失败" : "获取服务端时间失败";
+            throw new LicenseException(code!, msg!);
+        }
+
+        var data = root.GetProperty("data");
+        var serverTime = data.GetProperty("server_time").GetInt64();
+
+        // 必须验签：明文 server_time 可以被中间人改，签名里的 t 才是可信值
+        var payload = Token.Verify(data.GetProperty("token").GetString()!, _o.PublicKey);
+        var signed = GetLong(payload, "t");
+        if (signed is null || signed.Value != serverTime)
+            throw new LicenseException("BAD_TOKEN", "服务端时间令牌与明文时间不一致");
+
+        var skew = serverTime - DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        _state["clock_skew"] = JsonValue.Num(skew);
+        _store.Save(_state);
+        Log($"时钟同步完成: server={serverTime} skew={skew}s");
+        return skew;
     }
 
     // ---------------------------------------------------------------- 校验
@@ -255,16 +335,20 @@ public sealed class LicenseGuard
         if (payload is not null)
         {
             var mid = GetString(payload, "mid");
-            if (!string.IsNullOrEmpty(mid) && mid != _machineId)
+            // 同时接受 v2 与 v1 指纹：老用户升级 SDK 后本地令牌仍是 v1 指纹签发。
+            // 只认 v2 会在这里直接判 MACHINE_MISMATCH，而这个判定发生在联网之前，
+            // 永远走不到服务端的激活记录迁移（machine_id_alt）。
+            if (!string.IsNullOrEmpty(mid) && mid != _machineId && mid != _machineIdLegacy)
                 Deny("MACHINE_MISMATCH", "该授权绑定了另一台设备");
 
             var hexp = GetLong(payload, "hexp");
             if (hexp is not null && now > hexp.Value) Deny("LICENSE_EXPIRED", ExpiredMessage(payload));
 
             var exp = GetLong(payload, "exp") ?? 0;
-            if (now <= exp && now <= OfflineUntil())
+            // allowOffline=false 表示调用方要求必须拿到服务端确认，此时跳过快速通道强制联网
+            if (allowOffline && now <= exp && CanSkipOnline(now))
             {
-                _state["last_wall"] = JsonSerializer.SerializeToElement(now);
+                _state["last_wall"] = JsonValue.Num(now);
                 _store.Save(_state);
                 _info = FromPayload(payload, true, null);
                 return _info;
@@ -273,16 +357,15 @@ public sealed class LicenseGuard
 
         /* ---- 2) 联网校验 ---- */
         var endpoint = cached is null ? "/v1/activate" : "/v1/verify";
-        var resp = await PostAsync(endpoint, new
-        {
-            app_id = _o.AppId,
-            key = rawKey,
-            machine_id = _machineId,
-            machine_id_alt = _machineIdLegacy,
-            machine_name = Environment.MachineName,
-            platform = "windows",
-            app_version = typeof(LicenseGuard).Assembly.GetName().Version?.ToString() ?? "1.0.0",
-        }).ConfigureAwait(false);
+        var resp = await PostAsync(endpoint,
+            ("app_id", _o.AppId),
+            ("key", rawKey),
+            ("machine_id", _machineId),
+            ("machine_id_alt", _machineIdLegacy),
+            ("machine_name", Environment.MachineName),
+            ("platform", "windows"),
+            ("app_version", typeof(LicenseGuard).Assembly.GetName().Version?.ToString() ?? "1.0.0")
+        ).ConfigureAwait(false);
 
         if (resp is null)
         {
@@ -323,13 +406,20 @@ public sealed class LicenseGuard
 
         _state = new Dictionary<string, JsonElement>
         {
-            ["token"] = JsonSerializer.SerializeToElement(token),
-            ["last_online"] = JsonSerializer.SerializeToElement(serverTime),
-            ["last_wall"] = JsonSerializer.SerializeToElement(now),
-            ["license_key"] = JsonSerializer.SerializeToElement(rawKey),
-            ["offline_grace_days"] = JsonSerializer.SerializeToElement(PolicyInt(policy, "offline_grace_days", 0)),
-            ["heartbeat_sec"] = JsonSerializer.SerializeToElement(PolicyInt(policy, "heartbeat_sec", _o.HeartbeatSeconds)),
-            ["install_id"] = JsonSerializer.SerializeToElement(Guid.NewGuid().ToString("N")),
+            ["token"] = JsonValue.Str(token),
+            ["last_online"] = JsonValue.Num(serverTime),
+            ["last_wall"] = JsonValue.Num(now),
+            ["license_key"] = JsonValue.Str(rawKey),
+            ["offline_grace_days"] = JsonValue.Num(PolicyInt(policy, "offline_grace_days", 0)),
+            ["heartbeat_sec"] = JsonValue.Num(PolicyInt(policy, "heartbeat_sec", _o.HeartbeatSeconds)),
+            // 每次联网都重测一次偏差，避免长时间离线后 skew 过期
+            ["clock_skew"] = JsonValue.Num(serverTime - DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+            // install_id 是本机安装实例标识，跨进程重启必须稳定：
+            // 每次联网都新建会让服务端把它当成不同安装，无法做「同一台机器上的重复激活」统计。
+            ["install_id"] = JsonValue.Str(
+                _state.TryGetValue("install_id", out var iid) && iid.ValueKind == JsonValueKind.String
+                    ? iid.GetString()!
+                    : Guid.NewGuid().ToString("N")),
         };
         _store.Save(_state);
 
@@ -413,13 +503,12 @@ public sealed class LicenseGuard
     {
         var rawKey = ResolveLicenseKey();
         if (string.IsNullOrWhiteSpace(rawKey)) return false;
-        var resp = await PostAsync("/v1/deactivate", new
-        {
-            app_id = _o.AppId,
-            key = rawKey,
-            machine_id = _machineId,
-            machine_id_alt = _machineIdLegacy,
-        }).ConfigureAwait(false);
+        var resp = await PostAsync("/v1/deactivate",
+            ("app_id", _o.AppId),
+            ("key", rawKey),
+            ("machine_id", _machineId),
+            ("machine_id_alt", _machineIdLegacy)
+        ).ConfigureAwait(false);
         if (resp is not null && resp.Value.TryGetProperty("ok", out var ok) && ok.GetBoolean())
         {
             _store.Clear();
@@ -457,16 +546,36 @@ public sealed class LicenseGuard
         return "";
     }
 
+    /// <summary>
+    /// 算出用于到期判定的「当前时间」，并顺带检测系统时间被回拨。
+    /// <para>
+    /// 时间口径 = 本机挂钟 + <c>clock_skew</c>（上次联网时测得的服务端偏差，见 <see cref="SyncTimeAsync"/>）。
+    /// 没有 skew 时退化为裸挂钟，与旧版行为一致。
+    /// </para>
+    /// <para>两条回拨检测分别对应两个口径，互不干扰：</para>
+    /// <list type="number">
+    ///   <item>挂钟 vs 上次记录的挂钟（<c>last_wall</c>）—— 覆盖没有 skew 的情况</item>
+    ///   <item>校正时间 vs 上次服务端时间（<c>last_online</c>）—— 覆盖「改了时间且本地有 skew」的情况</item>
+    /// </list>
+    /// </summary>
     private (long now, bool tampered) EffectiveNow()
     {
         var wall = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var last = _state.TryGetValue("last_wall", out var l) ? l.GetInt64() : 0;
-        if (last > 0 && wall < last - _o.ClockToleranceSeconds)
+        var lastWall = _state.TryGetValue("last_wall", out var lw) ? lw.GetInt64() : 0;
+        if (lastWall > 0 && wall < lastWall - _o.ClockToleranceSeconds)
         {
-            Log($"检测到系统时间回拨: now={wall} last={last}");
-            return (last, true);
+            Log($"检测到系统时间回拨: now={wall} last={lastWall}");
+            return (lastWall, true);
         }
-        return (wall, false);
+
+        var now = wall + (_state.TryGetValue("clock_skew", out var s) ? s.GetInt64() : 0);
+        var lastOnline = _state.TryGetValue("last_online", out var lo) ? lo.GetInt64() : 0;
+        if (lastOnline > 0 && now < lastOnline - _o.ClockToleranceSeconds)
+        {
+            Log($"检测到服务端时间回拨: now={now} last_online={lastOnline}");
+            return (lastOnline, true);
+        }
+        return (now, false);
     }
 
     private long OfflineUntil()
@@ -475,6 +584,28 @@ public sealed class LicenseGuard
         if (last == 0) return 0;
         var grace = _state.TryGetValue("offline_grace_days", out var g) ? g.GetInt32() : 0;
         return last + grace * 86400L;
+    }
+
+    /// <summary>
+    /// 缓存令牌能否直接放行（完全不联网）。调用方已判过 <c>exp</c>，这里只判另外两条。
+    /// <para>
+    /// 1. 离线容忍期未耗尽（last_online + offline_grace_days）
+    /// 2. 距上次成功联网未超过 <see cref="GuardOptions.OnlineCheckIntervalSeconds"/>
+    /// </para>
+    /// <para>
+    /// 第 2 条是关键：间隔配成 0 时本方法恒为 false，即每次校验都联网，
+    /// 后台的吊销 / 改期 / 设过期立即生效；真连不上时才走离线容忍兜底。
+    /// </para>
+    /// </summary>
+    private bool CanSkipOnline(long now)
+    {
+        if (now > OfflineUntil()) return false;
+
+        var interval = _o.OnlineCheckIntervalSeconds;
+        if (interval <= 0) return false;
+
+        var lastOnline = _state.TryGetValue("last_online", out var l) ? l.GetInt64() : 0;
+        return lastOnline > 0 && now - lastOnline < interval;
     }
 
     private static string ExpiredMessage(Dictionary<string, JsonElement> p)
@@ -787,6 +918,74 @@ internal static class MachineFingerprint
 }
 
 // =============================================================================
+//  JSON 写出（AOT 安全，零反射）
+// =============================================================================
+
+/// <summary>
+/// 只用 <see cref="Utf8JsonWriter"/> 的命令式 API 拼 JSON。
+///
+/// 为什么不用 <c>JsonSerializer.Serialize</c>：那条路径对每个类型都要走
+/// <c>DefaultJsonTypeInfoResolver</c> 生成属性访问器，NativeAOT 下没有运行时代码生成，
+/// 会先报 IL2026 / IL3050，运行时抛 <c>NotSupportedException</c>
+/// （错误信息形如 "Metadata for type X was not provided"）。
+/// <c>Utf8JsonWriter</c> 是一组纯托管写入调用，不查任何类型元数据。
+/// </summary>
+internal static class JsonValue
+{
+    /// <summary>{"k":"v","n":null,...} —— value 为 null 时写 JSON null。</summary>
+    public static byte[] Object(IReadOnlyList<(string Key, string? Value)> fields)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            foreach (var (key, value) in fields)
+            {
+                if (value is null) w.WriteNull(key);
+                else w.WriteString(key, value);
+            }
+            w.WriteEndObject();
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>把已有的 JsonElement 字典写成 JSON 对象（状态文件用）。</summary>
+    public static byte[] Object(IReadOnlyDictionary<string, JsonElement> map)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            foreach (var kv in map)
+            {
+                w.WritePropertyName(kv.Key);
+                kv.Value.WriteTo(w);   // JsonElement.WriteTo 是纯数据拷贝，不涉及反射
+            }
+            w.WriteEndObject();
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>构造单值 JsonElement。套一层数组是因为 Utf8JsonWriter 在 depth=0 时不能写裸值。</summary>
+    private static JsonElement Single(Action<Utf8JsonWriter> write)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartArray();
+            write(w);
+            w.WriteEndArray();
+        }
+        using var doc = JsonDocument.Parse(ms.ToArray());
+        return doc.RootElement[0].Clone();
+    }
+
+    public static JsonElement Str(string s) => Single(w => w.WriteStringValue(s));
+    public static JsonElement Num(long n) => Single(w => w.WriteNumberValue(n));
+    public static JsonElement Bool(bool b) => Single(w => w.WriteBooleanValue(b));
+}
+
+// =============================================================================
 //  本地状态存储（HMAC 完整性保护）
 // =============================================================================
 
@@ -834,7 +1033,7 @@ internal sealed class StateStore
                 !CryptographicOperations.FixedTimeEquals(
                     Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(actual)))
             {
-                return new() { ["__tampered__"] = JsonSerializer.SerializeToElement(true) };
+                return new() { ["__tampered__"] = JsonValue.Bool(true) };
             }
 
             using var doc = JsonDocument.Parse(body);
@@ -852,7 +1051,7 @@ internal sealed class StateStore
     {
         try
         {
-            var body = JsonSerializer.SerializeToUtf8Bytes(data);
+            var body = JsonValue.Object(data);
             var head = Encoding.ASCII.GetBytes($"{Magic}:{Convert.ToHexString(Mac(body)).ToLowerInvariant()}\n");
             System.IO.Directory.CreateDirectory(Directory);
 

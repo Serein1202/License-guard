@@ -249,39 +249,94 @@ export async function listActivations(env: Env, licenseId: string): Promise<Acti
 }
 
 /**
- * 把旧版指纹的激活记录迁移到新指纹。
+ * 指纹迁移结果。
+ *
+ * signId      —— 写进令牌 mid 的值，必须是**客户端自己算出来的那个**指纹，
+ *                否则客户端校验 mid 时会判 MACHINE_MISMATCH。
+ * canonicalId —— 数据库里这台设备的规范主键，用于设备数判定、心跳刷新、解绑。
+ *
+ * 两者在正常路径上相同；只有「用户把软件降级回旧 SDK」时才会分叉：
+ * 旧 SDK 只上报 v1 指纹，服务端靠 machine_id_alt 认回记录，但令牌 mid 仍要回 v1。
+ */
+export interface ResolvedMachine {
+  signId: string;
+  canonicalId: string;
+}
+
+/**
+ * `activations.machine_id_alt` 列是否可用。null = 还没探测过。
+ *
+ * 这一列是 v2 指纹那次改版新增的，已有实例靠 ensureSchema 里的 ALTER 补上。
+ * 万一 ALTER 失败（权限、PRAGMA 差异等），这里会探测到 false 并缓存住，
+ * 让主链路退化成「不认降级」继续跑 —— 绝不能因为一个兼容列把激活打挂。
+ */
+let altColumn: boolean | null = null;
+
+async function altColumnAvailable(env: Env): Promise<boolean> {
+  if (altColumn !== null) return altColumn;
+  try {
+    await env.DB.prepare("SELECT machine_id_alt FROM activations LIMIT 1").run();
+    altColumn = true;
+  } catch {
+    console.error("[license-guard] activations.machine_id_alt 不可用，降级兼容已关闭");
+    altColumn = false;
+  }
+  return altColumn;
+}
+
+/**
+ * 把旧版指纹的激活记录迁移到新指纹，并处理反向兼容。
  *
  * 改版历史：v1 指纹把 MachineName / OSVersion / arch 也拼进了哈希，
  * 用户改电脑名或升级系统就会导致指纹漂移、白占一个设备位。
  * v2 指纹去掉了这些可变因子，因此老客户端升级后上报的是新 machine_id。
- * 这里让服务端认旧账：命中旧记录就地把 machine_id 改成新值，用户无感。
+ * 这里让服务端认旧账：命中旧记录就地把 machine_id 改成新值，同时把旧值
+ * 留在 machine_id_alt —— 这样用户把软件降级回旧版本时还能认回同一台设备，
+ * 不会因为「记录已经叫 v2 了」而被判 DEVICE_NOT_ACTIVATED。
  *
  * @param machineId 当前（新）指纹
  * @param legacyMachineId 旧算法算出的指纹，客户端通过 machine_id_alt 上报
- * @returns 规范化的 machine_id，后续所有判定与令牌都用它
  */
 export async function resolveMachineId(
   env: Env,
   licenseId: string,
   machineId: string,
   legacyMachineId?: string | null,
-): Promise<string> {
+): Promise<ResolvedMachine> {
   const legacy = (legacyMachineId || "").trim();
-  if (!legacy || legacy === machineId) return machineId;
 
-  // 新指纹已经是规范 ID，无需迁移
-  if (await getActivation(env, licenseId, machineId)) return machineId;
-  if (!(await getActivation(env, licenseId, legacy))) return machineId;
+  /* 1) 当前指纹直接命中主键 —— 最常见路径，一次查询 */
+  const direct = await getActivation(env, licenseId, machineId);
+  if (direct) return { signId: machineId, canonicalId: machineId };
+
+  /* 2) 当前指纹命中某条记录的 machine_id_alt —— 说明这是降级回旧 SDK 的机器。
+        只刷新原记录（canonicalId 用记录主键），不新建行、不占新设备位。 */
+  const alt = await altColumnAvailable(env);
+  if (alt) {
+    const byAlt = await env.DB
+      .prepare("SELECT * FROM activations WHERE license_id = ?1 AND machine_id_alt = ?2")
+      .bind(licenseId, machineId)
+      .first<ActivationRow>();
+    if (byAlt) return { signId: machineId, canonicalId: byAlt.machine_id };
+  }
+
+  if (!legacy || legacy === machineId) return { signId: machineId, canonicalId: machineId };
+
+  /* 3) 新指纹还没入库，但老指纹有记录 —— 把记录迁到新指纹。
+        COALESCE 保留最早的 alt，避免连续迁移（v1→v2→v3）把 v1 冲掉。 */
+  const old = await getActivation(env, licenseId, legacy);
+  if (!old) return { signId: machineId, canonicalId: machineId };
 
   // UPDATE OR IGNORE：新指纹若已被同授权下的另一条记录占用则放弃迁移，
   // 让上层按正常流程判定（通常是 DEVICE_LIMIT），不覆盖别人的记录。
-  await env.DB.prepare(
-    "UPDATE OR IGNORE activations SET machine_id = ?1 WHERE license_id = ?2 AND machine_id = ?3",
-  )
-    .bind(machineId, licenseId, legacy)
-    .run();
+  // 列缺失时退回只改主键的写法（代价仅是降级兼容失效，主链路照常）。
+  const sql = alt
+    ? "UPDATE OR IGNORE activations SET machine_id = ?1, machine_id_alt = COALESCE(machine_id_alt, ?3) " +
+      "WHERE license_id = ?2 AND machine_id = ?3"
+    : "UPDATE OR IGNORE activations SET machine_id = ?1 WHERE license_id = ?2 AND machine_id = ?3";
+  await env.DB.prepare(sql).bind(machineId, licenseId, legacy).run();
 
-  return machineId;
+  return { signId: machineId, canonicalId: machineId };
 }
 
 export type UpsertActivationResult = "ok" | "device_limit";

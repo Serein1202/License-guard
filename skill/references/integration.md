@@ -28,7 +28,12 @@ v2 指纹只采集**硬件级**因子，移除了主机名、OS 版本、CPU 架
 服务端把它当成新设备，单机授权直接卡在 `DEVICE_LIMIT`。
 
 三端 SDK 升级后会自动随请求带上 `machine_id_alt`（旧算法算出的指纹），
-服务端命中旧激活记录时就地改写为新指纹（`db.ts::resolveMachineId`），**用户无感，不会掉激活**。
+服务端命中旧激活记录时就地改写为新指纹，并把旧值留在 `activations.machine_id_alt`
+（`db.ts::resolveMachineId`），**用户无感，不会掉激活**。
+
+留这个旧值是给**降级**兜底：用户把软件退回上一版后，旧 SDK 只上报 v1 指纹，
+服务端靠 alt 认回同一条记录（令牌 `mid` 回退成 v1，记录主键仍是 v2，不新增设备位）。
+没有它，降级用户的每次校验都会是 `DEVICE_NOT_ACTIVATED`。
 
 对调用方的要求：无。升级 SDK 即可。
 
@@ -95,9 +100,11 @@ if __name__ == "__main__":
 | `strict_clock` | `True` | 检测到系统时间回拨时是否判失效 |
 | `clock_tolerance_sec` | `300` | 允许的时间偏差（秒），避免 NTP 校时误伤 |
 | `request_timeout` | `8` | 单次请求超时（秒） |
-| `retry_times` | `2` | 网络失败重试次数 |
+| `retry_times` | `3` | 网络失败重试次数 |
 | `heartbeat_sec` | `21600` | 心跳间隔默认值（服务端策略会覆盖） |
 | `watchdog_interval_sec` | `120` | 看门狗检查间隔——**到期后最多这么久就会退出**。`>0` = 固定间隔，每轮都用它，不被后端 `heartbeat_sec` 覆盖；`0` = 跟随后端心跳。下限 15 秒 |
+| `heartbeat_cap_sec` | `0` | 仅在上者为 `0` 时生效：本地复查间隔上限（`0` = 不封顶） |
+| `online_check_interval_sec` | `0` | 缓存令牌免联网的最长时间。`0` = **每次校验都联网**，后台封禁立即生效；`>0` = 该时长内复用缓存，封禁延迟变大 |
 | `storage_dir` | 系统数据目录 | 本地状态文件位置 |
 | `on_denied` | `None` | `(code, message) -> None`。设了它就**不会**自动退出，由你自己处理 |
 | `debug` | `False` | 打印调试日志到 stderr |
@@ -205,6 +212,25 @@ console.log("剩余天数:", guard.daysLeft());
 if (guard.hasFeature("pro")) { /* ... */ }
 ```
 
+### 所有配置项（Node）
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `serverUrl` / `appId` / `publicKey` | 必填 | 与后台一致 |
+| `licenseKey` | `""` | 留空时读 `LICENSE_KEY` 环境变量 / 同目录 `license.key` |
+| `failMode` | `"hard"` | `hard` 直接 `process.exit`；`message` 提示后退出 |
+| `exitCode` | `0` | 退出码 |
+| `strictClock` | `true` | 检测到系统时间回拨时是否判失效 |
+| `clockToleranceSec` | `300` | 允许的时间偏差 |
+| `requestTimeoutMs` | `8000` | 单次请求超时 |
+| `retryTimes` | `3` | 网络失败重试次数 |
+| `heartbeatSec` | `21600` | 心跳间隔默认值（服务端策略会覆盖） |
+| `watchdogIntervalSec` | `120` | `>0` = 固定复查间隔，不被后端心跳覆盖；`0` = 跟随后端 `heartbeat_sec`。下限 15 秒 |
+| `heartbeatCapSec` | `900` | 仅在上者为 `0` 时生效：本地复查间隔上限 |
+| `onlineCheckIntervalSec` | `0` | 缓存令牌免联网的最长时间。`0` = 每次校验都联网，后台封禁立即生效 |
+| `storageDir` | 系统数据目录 | 本地状态文件位置 |
+| `onDenied` | `null` | `(code, message) => void`。设了它就不会自动退出 |
+
 ### Electron 注意点
 
 `process.exit()` 在 Electron 主进程里同样有效。如果你希望渲染进程先收到通知再退出，用 `onDenied`：
@@ -299,6 +325,7 @@ if (guard.HasFeature("pro")) { /* ... */ }
 | `WatchdogIntervalSeconds` | `120` | `>0` = 固定复查间隔，每轮都用它，不被后端心跳覆盖；`0` = 跟随后端 `heartbeat_sec`。下限 15 秒 |
 | `HeartbeatCapSeconds` | `900` | 仅在上者为 `0` 时生效：本地复查间隔上限 |
 | `HeartbeatSeconds` | `21600` | 心跳间隔默认值（服务端策略会覆盖） |
+| `OnlineCheckIntervalSeconds` | `0` | 缓存令牌免联网的最长时间。`0` = 每次校验都联网，后台封禁立即生效 |
 | `MachineId` | 只读 | 本机 v2 指纹 |
 | `MachineIdLegacy` | 只读 | 本机 v1 指纹，SDK 自动上报给服务端做激活迁移 |
 
@@ -379,7 +406,7 @@ guard.start_watchdog()     # 到期那一刻，即使程序正在跑也会退出
 - **传 `>0`（推荐）**：固定间隔，每一轮都按这个值复查，不会被后端下发的 `heartbeat_sec` 覆盖。要"到期即退"就传 15。
 - **传 `0`**：跟随后端 `heartbeat_sec`（后端是唯一权威），可用 `heartbeat_cap_sec` 在本地夹上限。
 
-> 历史版本缺陷：传 15 秒时，Python 端首次成功后会改用后端 `heartbeat_sec`（默认 6 小时），
+> 历史版本缺陷：传 15 秒时，Python 端在首次成功后会改用后端 `heartbeat_sec`（默认 6 小时），
 > Node 端会改用 `min(heartbeat_sec, 900)`，配置不生效。v2 已修正为「显式配置即固定间隔」。
 
 ### 让客户端完全跟随后端策略
@@ -396,21 +423,55 @@ guard.start_watchdog()     # 到期那一刻，即使程序正在跑也会退出
 
 ### 让后台的「吊销 / 改期」立刻生效
 
-客户端本地会缓存服务端签发的令牌。默认情况下 `online_check_interval_sec = 0`：**每次校验都必须联网**，只有真连不上服务器时才退回离线容忍放行。因此在后台把授权改成过期 / 吊销 / 暂停，客户端下一次校验（启动时，或运行期看门狗周期）就会被拦下。
+三端 SDK 的默认行为一致：`online_check_interval_sec = 0`，即**每次校验都必须联网**，只有真连不上服务器时才退回离线容忍放行。
+
+| 语言 | 字段名 | 默认 |
+|---|---|---|
+| Python | `online_check_interval_sec` | `0` |
+| Node | `onlineCheckIntervalSec` | `0` |
+| C# | `OnlineCheckIntervalSeconds` | `0` |
+
+因此在后台把授权改成过期 / 吊销 / 暂停，客户端下一次校验（启动时，或运行期看门狗周期）就会被拦下。默认看门狗 120 秒一轮，所以**封禁最坏延迟约等于一个看门狗周期 + 一次请求超时**。
 
 如果想减少请求量，把它调大（例如 3600），则在该时长内复用缓存、不再联网 —— 代价是后台改动要等到下次联网才生效：
 
 ```python
 cfg = GuardConfig(
     ...,
-    online_check_interval_sec = 0,     # 0 = 每次都联网（推荐）；>0 = 该时长内复用缓存
+    online_check_interval_sec = 3600,  # 0 = 每次都联网（推荐）；>0 = 该时长内复用缓存
 )
 ```
+
+```javascript
+new LicenseGuard({ ..., onlineCheckIntervalSec: 3600 });
+```
+
+```csharp
+new GuardOptions { ..., OnlineCheckIntervalSeconds = 3600 };
+```
+
+判定逻辑三端一致，缓存复用必须同时满足三条：
+1. 令牌未过期（`exp`）
+2. 离线容忍未耗尽（`last_online + offline_grace_days`）
+3. 距上次成功联网 < `online_check_interval_sec`（配 `0` 时这条恒不成立）
 
 另外，服务端明确判失效（`LICENSE_EXPIRED` / `LICENSE_REVOKED` / `LICENSE_SUSPENDED` / `KEY_NOT_FOUND` / `APP_DISABLED` / `APP_UNKNOWN`）时，客户端会**同时清掉本地缓存令牌**，否则用户只要断网就能凭旧令牌的离线容忍期把程序继续跑起来。限流（`RATE_LIMITED`）这类临时性拒绝不算失效：只要离线容忍仍有效就照常放行，避免一次限流把正常用户挡在门外。
 
 > 真正的「不可绕过」取决于 `offline_grace_days`：它决定客户端在断网状态下最长能跑多久。
 > 想做到断网也立刻失效，把它设为 `0`（此时客户端必须始终能连上 Worker）。
+
+#### 强制联网校验（`allow_offline`）
+
+三端都提供「本次校验不接受离线结论」的开关，适合放在关键操作前（生成许可文件、导出数据、扣费动作）：
+
+| 语言 | 调用 |
+|---|---|
+| Python | `guard.verify(allow_offline=False)` |
+| Node | `await guard.verify({ allowOffline: false })` |
+| C# | `await guard.VerifyAsync(allowOffline: false)` |
+
+置 `false` 会**跳过缓存快速通道**直接联网；连不上就抛 `NETWORK`，不会拿旧令牌放行。
+默认 `true` 才会走「令牌未过期 + 离线容忍未耗尽 + 未到复查间隔」的本地放行。
 
 ### 内网 / 完全断网环境
 

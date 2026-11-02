@@ -408,7 +408,7 @@ class GuardConfig:
 
     clock_tolerance_sec: int = 300
     request_timeout: int = 8
-    retry_times: int = 2
+    retry_times: int = 3
     heartbeat_sec: int = 21600
     watchdog_interval_sec: int = 120
     """看门狗检查间隔（秒）。
@@ -652,6 +652,71 @@ class LicenseGuard:
             print("[license-guard]", *a, file=sys.stderr)
 
     # ------------------------------------------------------ 网络请求
+    def _get(self, path: str) -> Optional[Dict[str, Any]]:
+        """GET 一个 JSON 接口。重试 / 超时策略与 _post 一致。"""
+        url = f"{self.server_url}{path}"
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"User-Agent": f"license-guard-py/{__version__}"},
+        )
+        last_err: Optional[Exception] = None
+        for attempt in range(max(1, self.cfg.retry_times)):
+            try:
+                with urllib.request.urlopen(req, timeout=self.cfg.request_timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                try:
+                    payload = json.loads(e.read().decode("utf-8"))
+                except Exception:
+                    payload = {"ok": False, "code": "HTTP_%d" % e.code, "message": str(e)}
+                if e.code in (401, 403, 404, 409, 429):
+                    return payload          # 服务端明确拒绝，不重试
+                last_err = e
+            except Exception as e:
+                last_err = e
+            if attempt < self.cfg.retry_times - 1:
+                time.sleep(0.8 * (attempt + 1))
+        self._log("网络不可用:", last_err)
+        return None
+
+    def sync_time(self) -> int:
+        """主动取一次服务端权威时间，算出本机时钟偏差（skew = 服务端时间 − 本机挂钟）并落盘。
+
+        作用是让「把系统时间调回过去」这类绕过在本地就算得出来：后续到期判定都用
+        `挂钟 + skew`，而不是裸的本地时间。server_time 带签名，中间人改不了；
+        这里还会比对签名里的 t 与明文 server_time，不一致直接抛错。
+
+        离线时抛 LicenseError("NETWORK")；正常校验路径不依赖它，调用方可不处理。
+        """
+        with self._lock:
+            self._state = self.store.load() or {}
+            if self._state.get("__tampered__"):
+                self.store.clear()
+                self._state = {}
+
+            resp = self._get("/v1/time?app_id=" + urllib.parse.quote(self.cfg.app_id))
+            if resp is None:
+                raise LicenseError("NETWORK", "无法连接授权服务器获取时间")
+            if not resp.get("ok"):
+                raise LicenseError(
+                    resp.get("code") or "DENIED",
+                    resp.get("message") or "获取服务端时间失败",
+                )
+
+            data = resp["data"]
+            server_time = int(data["server_time"])
+            # 必须验签：明文 server_time 可被中间人改，签名里的 t 才是可信值
+            payload = _Token.verify(data["token"], self.cfg.public_key, self.cfg.sign_alg)
+            if int(payload.get("t") or -1) != server_time:
+                raise LicenseError("BAD_TOKEN", "服务端时间令牌与明文时间不一致")
+
+            skew = server_time - int(time.time())
+            self._state["clock_skew"] = skew
+            self.store.save(self._state)
+            self._log(f"时钟同步完成: server={server_time} skew={skew}s")
+            return skew
+
     def _post(self, path: str, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         url = f"{self.server_url}{path}"
         data = json.dumps(body).encode("utf-8")
@@ -686,16 +751,27 @@ class LicenseGuard:
 
     # -------------------------------------------------------- 时间锚点
     def _effective_now(self, state: Dict[str, Any]) -> tuple:
-        """
-        返回 (有效当前时间, 是否疑似时钟被回拨)。
-        把「系统时间调回过去」这种最常见的绕过手段堵住。
+        """返回 (有效当前时间, 是否疑似时钟被回拨)。把「系统时间调回过去」这种最常见的绕过手段堵住。
+
+        时间口径 = 本机挂钟 + clock_skew（上次联网测得的服务端偏差，见 sync_time()）。
+        没有 skew 时退化为裸挂钟，与旧版行为一致。
+
+        两条回拨检测分别对应两个口径，互不干扰：
+          1. 挂钟 vs 上次记录的挂钟（last_wall）—— 覆盖没有 skew 的情况
+          2. 校正时间 vs 上次服务端时间（last_online）—— 覆盖「改了时间且本地有 skew」的情况
         """
         wall = int(time.time())
-        last = int(state.get("last_wall") or 0)
-        if last and wall < last - self.cfg.clock_tolerance_sec:
-            self._log(f"检测到系统时间回拨: now={wall} last={last}")
-            return last, True
-        return wall, False
+        last_wall = int(state.get("last_wall") or 0)
+        if last_wall and wall < last_wall - self.cfg.clock_tolerance_sec:
+            self._log(f"检测到系统时间回拨: now={wall} last={last_wall}")
+            return last_wall, True
+
+        now = wall + int(state.get("clock_skew") or 0)
+        last_online = int(state.get("last_online") or 0)
+        if last_online and now < last_online - self.cfg.clock_tolerance_sec:
+            self._log(f"检测到服务端时间回拨: now={now} last_online={last_online}")
+            return last_online, True
+        return now, False
 
     def _offline_until(self) -> int:
         """离线容忍截止时间；从未成功联网过则返回 0（意味着必须联网）"""
@@ -763,15 +839,20 @@ class LicenseGuard:
                     payload = None
 
             if payload is not None:
-                if payload.get("mid") and payload["mid"] != self.machine_id:
+                mid = payload.get("mid")
+                # 同时接受 v2 与 v1 指纹：老用户升级 SDK 后，本地令牌仍是 v1 指纹签发的。
+                # 只认 v2 会在这里直接判 MACHINE_MISMATCH，而这个判定发生在联网之前，
+                # 永远走不到服务端的激活记录迁移（machine_id_alt），结果是正版用户升级即掉激活。
+                if mid and mid not in (self.machine_id, legacy_machine_id()):
                     self._raise("MACHINE_MISMATCH", "该授权绑定了另一台设备")
 
                 hexp = payload.get("hexp")
                 if hexp and now > int(hexp):
                     self._raise("LICENSE_EXPIRED", self._expired_msg(payload))
 
-                # 令牌未过期 且 离线容忍未耗尽 且 未到复查间隔 → 直接放行，不联网
-                if self._can_skip_online(now, payload):
+                # 令牌未过期 且 离线容忍未耗尽 且 未到复查间隔 → 直接放行，不联网。
+                # allow_offline=False 表示调用方要求必须拿到服务端确认，此时跳过快速通道强制联网。
+                if allow_offline and self._can_skip_online(now, payload):
                     self._state["last_wall"] = now
                     self.store.save(self._state)
                     self._info = self._info_from_payload(payload, offline=True)
@@ -848,6 +929,8 @@ class LicenseGuard:
                 "license_key": raw_key,
                 "offline_grace_days": int(policy.get("offline_grace_days") or 0),
                 "heartbeat_sec": int(policy.get("heartbeat_sec") or self.cfg.heartbeat_sec),
+                # 每次联网都重测一次偏差，避免长时间离线后 skew 过期
+                "clock_skew": server_time - int(time.time()),
                 "install_id": self._state.get("install_id") or uuid.uuid4().hex,
             }
             self.store.save(self._state)

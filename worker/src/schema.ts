@@ -34,6 +34,43 @@ let ready = false;
 /** 并发请求共享同一次初始化，避免重复建表 */
 let inflight: Promise<void> | null = null;
 
+/**
+ * 给已存在的表补列。ALTER TABLE ADD COLUMN 在 D1 上不能带 IF NOT EXISTS，
+ * 所以先用 PRAGMA table_info 判断。
+ */
+async function ensureColumn(env: Env, table: string, column: string, type: string): Promise<void> {
+  const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+  const exists = (info.results || []).some((c) => c.name === column);
+  if (exists) return;
+  try {
+    await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
+    console.log(`[license-guard] schema migrated: ${table}.${column}`);
+  } catch (e) {
+    // 并发 isolate 同时补列时后到的那次会报 duplicate column，忽略即可
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/duplicate column/i.test(msg)) throw e;
+  }
+}
+
+/**
+ * 列级迁移的整体容错。
+ *
+ * 为什么失败也要放行：这些列都是**边缘兼容路径**用的（例：machine_id_alt
+ * 只影响「用户降级回旧 SDK」），主链路的激活 / 校验 / 到期判定不依赖它们。
+ * 如果因为 ALTER 权限、PRAGMA 变体差异之类的环境问题让迁移抛异常，
+ * 正确做法是退化成「没有该列」继续服务，而不是让整个实例 500。
+ *
+ * @returns 本次实际完成的迁移项，抛错则返回已回滚的空列表
+ */
+async function migrateColumns(env: Env): Promise<void> {
+  try {
+    await ensureColumn(env, "activations", "machine_id_alt", "TEXT");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[license-guard] schema migration skipped (non-fatal): ${msg}`);
+  }
+}
+
 export async function ensureSchema(env: Env): Promise<void> {
   if (ready) return;
   if (inflight) return inflight;
@@ -61,6 +98,10 @@ export async function ensureSchema(env: Env): Promise<void> {
         }
         console.log(`[license-guard] schema initialized (${STATEMENTS.length} statements)`);
       }
+
+      /* 列级迁移：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，
+         所以后续版本新加的列都要在这里逐个 ensure。幂等，失败不阻断服务。 */
+      await migrateColumns(env);
 
       ready = true;
     } finally {

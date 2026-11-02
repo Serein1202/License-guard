@@ -221,6 +221,17 @@ export function checkAdmin(req: Request, env: { ADMIN_TOKEN?: string }): boolean
 }
 
 /**
+ * 读取环境变量里的限流上限。未配置、非法或小于 1 时回落到默认值。
+ * 上限封到 100000，避免配错把 KV 写爆（KV 免费版每天写入次数有限）。
+ */
+export function rateLimitOf(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(Math.floor(n), 100000);
+}
+
+/**
  * 基于 KV 的滑动窗口限流。
  * 免费版 KV 每天写入有限，因此窗口粒度放到分钟级。
  */

@@ -172,6 +172,7 @@ WPF/WinForms 放在 `App.xaml.cs` 的 `OnStartup` 里，早于主窗口创建。
 | `references/integration.md` | 三端完整接入指南：全部配置项、错误码表、Electron/WPF 接入、常见场景（内网、打包、换机解绑、调试） |
 | `references/api.md` | Worker HTTP API 契约：请求/响应结构、令牌载荷、限流、错误码 |
 | `references/admin.md` | 后台运维：建产品、签发授权码、改到期时间、吊销、解绑设备（含 curl 示例） |
+| `references/security.md` | 安全模型：能防住什么、防不住什么、指纹采集口径、AOT/加壳加固路径 |
 | `scripts/install_sdk.py` | 探测语言 + 拷贝 SDK + 生成配置常量 |
 | `scripts/selfcheck.py` | 校验服务地址 / `app_id` / 公钥是否与服务端匹配 |
 | `assets/clients/` | 三端 SDK 源码（零第三方依赖） |

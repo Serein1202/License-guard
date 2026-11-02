@@ -223,8 +223,10 @@ Skill 靠部署配置找到「你的」授权服务器。仓库里 `skill/config
 **两处边界要说清楚**（设计取舍，不是缺陷）：
 
 - **后台封禁不是绝对即时的。** 客户端握着未过期的缓存令牌时可先本地通过，连不上服务器时还能按离线策略继续用。
-  允许短期断网，就不可能同时保证后台操作立刻生效。最坏延迟 ≈ `token_ttl_sec + offline_grace_days×86400`；
-  想压到 1 小时内就设 `token_ttl_sec=3600`、`offline_grace_days=0`，代价是联网更频繁、断网更容易起不来。
+  允许短期断网，就不可能同时保证后台操作立刻生效。延迟分两种场景：
+  能联网时 ≈ 一个看门狗周期（默认 120 秒）+ 请求超时；断网时以 `offline_grace_days` 为上限。
+  想压断网窗口就设 `offline_grace_days=0`，代价是无网环境完全起不来。
+  （`token_ttl_sec` 不参与封禁延迟判定——三端默认每次校验都联网，它只限制「客户端开缓存复用后旧令牌还能用多久」。）
 - **硬件指纹不是不可伪造的设备身份证明。** 它提高的是"复制目录盗用"的成本，
   拦不住会改程序、会伪造请求或克隆虚拟机的人 —— 那属于加壳/混淆的范围。
   指纹 v2 已移除主机名、OS 版本、CPU 架构这些可变因子（它们只会让正版用户改个电脑名就掉激活），
@@ -335,7 +337,8 @@ license-guard/
 └── docs/
     ├── DEPLOY.md                  部署指南（一步步来）
     ├── INTEGRATION.md             客户端接入指南
-    └── SECURITY.md                安全模型与加固建议
+    ├── SECURITY.md                安全模型与加固建议
+    └── AOT.md                     C# NativeAOT 说明与验证方法
 ```
 
 ---
@@ -442,6 +445,7 @@ eyJ2IjoxLCJzdWIiOiJsaWNfYTFiMmMzIiwibWlkIjoiMjY4YThiMTRlYTZm...
 - **[docs/DEPLOY.md](docs/DEPLOY.md)** —— 从零开始部署，含每一步的预期输出和排错
 - **[docs/INTEGRATION.md](docs/INTEGRATION.md)** —— 三端 SDK 完整参数说明、命令行工具 / GUI 程序 / 内网离线环境的接法
 - **[docs/SECURITY.md](docs/SECURITY.md)** —— 能防住什么、防不住什么、怎么继续加固
+- **[docs/AOT.md](docs/AOT.md)** —— C# 客户端 NativeAOT 现状、为什么不用源生成、三层验证方法
 - **[skill/SKILL.md](skill/SKILL.md)** —— AI Skill 的五步接入流程与三端注入代码
 
 ---

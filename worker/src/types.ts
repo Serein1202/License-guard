@@ -14,6 +14,15 @@ export interface Env {
   LICENSE_KEY_ED25519?: string;
   /** ECDSA P-256 私钥 pkcs8 DER (base64)，wrangler secret put LICENSE_KEY_ES256 */
   LICENSE_KEY_ES256?: string;
+
+  /**
+   * 每个 IP 每 60s 允许的激活次数。默认 30。
+   * 同一个 NAT 出口后面有很多台机器时（企业内网、校园网）会撞到这个值，
+   * 可以在 wrangler.toml 的 [vars] 里调大。
+   */
+  RATE_LIMIT_ACTIVATE?: string;
+  /** 每个 IP 每 60s 允许的校验次数。默认 120。 */
+  RATE_LIMIT_VERIFY?: string;
 }
 
 export type SignAlg = "ed25519" | "es256";
@@ -59,6 +68,8 @@ export interface ActivationRow {
   id: string;
   license_id: string;
   machine_id: string;
+  /** 上一个已知指纹（v1 → v2 迁移时留下的旧值），用于兼容降级回旧 SDK 的客户端 */
+  machine_id_alt: string | null;
   machine_name: string | null;
   app_version: string | null;
   platform: string | null;

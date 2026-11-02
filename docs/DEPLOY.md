@@ -305,6 +305,15 @@ id = "你的 KV id"
 > ⚠️ **一旦填了 ID，它就会随公开仓库暴露。** 这就是为什么默认配置里不写 ID。
 > 只想让本机知道、不进仓库的话，用 `git update-index --skip-worktree worker/wrangler.toml`。
 > KV 只用来做接口限流，免费版每天 1000 次写入够用。
+>
+> 限流默认 激活 30 次/分/IP、校验 120 次/分/IP，桶按 `app_id + IP` 分开。
+> 同一个 NAT 出口后面机器很多（企业内网、校园网）时，可在 `wrangler.toml` 的 `[vars]` 里调大：
+>
+> ```toml
+> [vars]
+> RATE_LIMIT_ACTIVATE = "120"
+> RATE_LIMIT_VERIFY = "600"
+> ```
 
 </details>
 
@@ -315,6 +324,10 @@ npm run db:remote
 ```
 
 > **也可以跳过** —— Worker 首次收到请求时会自动建表（`src/schema.ts`）。
+>
+> **升级已有实例时同样什么都不用做**：新版本加的列（例如 `activations.machine_id_alt`）
+> 由 `schema.ts::ensureColumn` 在首次请求时自动 `ALTER TABLE ADD COLUMN`，幂等、不锁表、不影响在线请求。
+> 想手动补也可以：`npx wrangler d1 execute DB --remote --command "ALTER TABLE activations ADD COLUMN machine_id_alt TEXT"`。
 
 ---
 
@@ -461,10 +474,71 @@ routes = [
 
 ---
 
+## 升级已有实例（从旧版本更新）
+
+已经在跑的实例直接 `git push`（连了 GitHub 自动部署）或 `wrangler deploy` 即可，
+**不需要手工导出/导入数据，也不需要手动跑 `wrangler d1 execute`**。
+
+### 表结构是怎么迁的
+
+`schema.sql` 里的 `CREATE TABLE IF NOT EXISTS` 对**已存在的表**不产生任何作用，
+所以新版本新增的列由 `src/schema.ts` 在运行时用 `ALTER TABLE ... ADD COLUMN` 补：
+
+1. 第一个请求进来 → 检查 `products` 表是否存在（不存在才建全表）
+2. 用 `PRAGMA table_info` 判断缺哪些列 → 缺才 `ALTER`
+3. 幂等；多个 isolate 并发补列时靠 `duplicate column` 忽略后到的那次
+
+**迁移失败不会让服务不可用**：这些列只服务于「用户降级回旧版客户端」这类兼容路径，
+主链路（激活 / 校验 / 到期）不依赖它们。`ALTER` 抛错时只会打一条日志然后跳过，
+`db.ts` 查询前也会探测列是否真的在，缺失就退化成不认降级继续跑。
+
+想自己验证一遍（不需要碰线上数据，全程在本地临时库里跑）：
+
+```bash
+npm run test:migration
+```
+
+### ⚠️ 部署顺序：先 Worker，后客户端
+
+v2 指纹改版后，客户端上报的 `machine_id` 会变。服务端靠客户端同时上报的
+`machine_id_alt`（旧指纹）认回老记录 —— **这个字段只有新版 Worker 认识**。
+
+| 顺序 | 结果 |
+|---|---|
+| 先部署 Worker，再发客户端 | 老用户无感迁移，不占新设备位 |
+| **先发客户端，后部署 Worker** | 老 Worker 把新指纹当成一台新机器：设备位有空 → 白占一个；**设备位已满 → 用户直接 `DEVICE_LIMIT` 用不了** |
+
+保险做法：发客户端版本前，先在后台把相关软件的 `max_devices` 临时调大 1~2 个，
+升级完成（用户普遍跑过一次新版）后再调回来。
+
+### 推送前自己跑一遍
+
+本仓库不带 CI 流水线 —— 部署走 Workers Builds（连了 GitHub 就自动部署），
+所以**推送前在本地把这套跑过**再 push：
+
+```bash
+cd worker
+npm run typecheck
+npm run test:activation     # 纯 SQLite 复刻，最快
+npm run test:e2e            # 升级链路（自动拉起 wrangler dev）
+npm run test:concurrency    # 并发抢设备位
+npm run test:migration      # 已有实例升级
+npm run test:timesync       # 三端时钟同步（需要 .NET 8）
+```
+
+### 回滚安全
+
+万一新版有问题想退回旧代码，直接部署旧版本即可 ——
+旧代码的 SQL 全部是 `SELECT *` 或显式列名 `INSERT`（`id, license_id, machine_id, ...`），
+既不读也不依赖 `machine_id_alt`。多出来的那一列留在库里不影响旧代码，
+之后再升上来也不用重新迁移。
+
+---
+
 ## 常见问题
 
 **Q：`wrangler deploy` 报 "You must be logged in"**
-A：`npx wrangler login` 重新登录。CI 环境下改用 `CLOUDFLARE_API_TOKEN` 环境变量。
+A：`npx wrangler login` 重新登录。非交互环境改用 `CLOUDFLARE_API_TOKEN` 环境变量。
 
 **Q：`npm run db:remote` 报 "no such table"**
 A：用 `npx wrangler d1 list` 看看是不是绑到了别的库。默认配置不写 ID、由 wrangler 自动创建，一般不需要手动跑这条命令 —— Worker 首次收到请求时会自己建表。
@@ -498,6 +572,8 @@ A：重新 `npm run keys` → `wrangler secret put` 覆盖 → 所有客户端�
 | `LICENSE_KEY_ES256` | secret | ECDSA P-256 私钥（pkcs8 DER，base64url） |
 | `ENVIRONMENT` | var | 环境标识，显示在后台右上角 |
 | `ADMIN_CORS_ORIGIN` | var | 管理后台跨域部署时填前端地址；同源部署留空 |
+| `RATE_LIMIT_ACTIVATE` | var | 可选。激活接口每 IP 每分钟上限，默认 30 |
+| `RATE_LIMIT_VERIFY` | var | 可选。校验接口每 IP 每分钟上限，默认 120 |
 
 ## 定时任务
 

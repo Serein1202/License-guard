@@ -44,17 +44,20 @@ CREATE INDEX IF NOT EXISTS idx_licenses_expires  ON licenses(expires_at);
 CREATE INDEX IF NOT EXISTS idx_licenses_status   ON licenses(status);
 
 -- ---------- 设备激活记录 ----------
+-- machine_id_alt：上一个已知指纹。SDK 从 v1 指纹升级到 v2 后，这里存 v1，
+-- 用于「用户把软件降级回旧版本」时仍能认回同一台设备（见 db.ts::resolveMachineId）。
 CREATE TABLE IF NOT EXISTS activations (
-  id            TEXT    PRIMARY KEY,
-  license_id    TEXT    NOT NULL,
-  machine_id    TEXT    NOT NULL,
-  machine_name  TEXT,
-  app_version   TEXT,
-  platform      TEXT,
-  ip            TEXT,
-  country       TEXT,
-  activated_at  INTEGER NOT NULL,
-  last_seen_at  INTEGER NOT NULL,
+  id              TEXT    PRIMARY KEY,
+  license_id      TEXT    NOT NULL,
+  machine_id      TEXT    NOT NULL,
+  machine_id_alt  TEXT,
+  machine_name    TEXT,
+  app_version     TEXT,
+  platform        TEXT,
+  ip              TEXT,
+  country         TEXT,
+  activated_at    INTEGER NOT NULL,
+  last_seen_at    INTEGER NOT NULL,
   UNIQUE (license_id, machine_id),
   FOREIGN KEY (license_id) REFERENCES licenses(id) ON DELETE CASCADE
 );
